@@ -1,0 +1,263 @@
+"""
+LLM Client Abstraction Layer
+"""
+
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, Any
+import time
+from loguru import logger
+from groq import Groq
+from openai import OpenAI
+import httpx
+
+from backend.app.config import settings
+
+
+class BaseLLMClient(ABC):
+    """Abstract base class for LLM clients"""
+    
+    def __init__(self, api_key: str, model_name: str):
+        self.api_key = api_key
+        self.model_name = model_name
+        self.request_count = 0
+        self.total_tokens = 0
+    
+    @abstractmethod
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text synchronously"""
+        pass
+    
+    @abstractmethod
+    async def generate_async(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text asynchronously"""
+        pass
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get client statistics"""
+        return {
+            "model": self.model_name,
+            "requests": self.request_count,
+            "total_tokens": self.total_tokens
+        }
+
+
+class GroqClient(BaseLLMClient):
+    """Groq API client"""
+    
+    def __init__(self, api_key: str, model_name: str = "llama3-8b-8192"):
+        super().__init__(api_key, model_name)
+        self.client = Groq(api_key=api_key)
+        logger.info(f"✅ Initialized Groq client: {model_name}")
+    
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text using Groq API"""
+        try:
+            start_time = time.time()
+            
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+            
+            latency = int((time.time() - start_time) * 1000)
+            
+            self.request_count += 1
+            self.total_tokens += response.usage.total_tokens
+            
+            content = response.choices[0].message.content
+            
+            logger.debug(f"Groq call: {self.model_name} | Tokens: {response.usage.total_tokens} | {latency}ms")
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"❌ Groq API error: {e}")
+            raise
+    
+    async def generate_async(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """
+        Generate text asynchronously using thread pool executor
+        This is simpler and more reliable than manual HTTP calls
+        """
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            
+            # Run synchronous method in executor to avoid blocking
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.generate(prompt, temperature, max_tokens, **kwargs)
+            )
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"❌ Groq API error (async): {e}")
+            raise
+
+
+
+class NVIDIAClient(BaseLLMClient):
+    """NVIDIA NIM API client"""
+    
+    def __init__(self, api_key: str, model_name: str = "meta/llama3-70b-instruct"):
+        super().__init__(api_key, model_name)
+        self.client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=api_key
+        )
+        logger.info(f"✅ Initialized NVIDIA client: {model_name}")
+    
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text using NVIDIA NIM API"""
+        try:
+            start_time = time.time()
+            
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+            
+            latency = int((time.time() - start_time) * 1000)
+            
+            self.request_count += 1
+            if hasattr(response, 'usage') and response.usage:
+                self.total_tokens += response.usage.total_tokens
+            
+            content = response.choices[0].message.content
+            
+            logger.debug(f"NVIDIA call: {self.model_name} | {latency}ms")
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"❌ NVIDIA API error: {e}")
+            raise
+    
+    async def generate_async(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text asynchronously"""
+        try:
+            start_time = time.time()
+            
+            async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT) as client:
+                response = await client.post(
+                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": self.model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        **kwargs
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
+            
+            latency = int((time.time() - start_time) * 1000)
+            
+            self.request_count += 1
+            if "usage" in data and data["usage"]:
+                self.total_tokens += data["usage"]["total_tokens"]
+            
+            content = data["choices"][0]["message"]["content"]
+            
+            logger.debug(f"NVIDIA async: {self.model_name} | {latency}ms")
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"❌ NVIDIA API error (async): {e}")
+            raise
+
+
+class LLMClientFactory:
+    """Factory for creating LLM clients"""
+    
+    @staticmethod
+    def create(
+        provider: str,
+        model_name: str,
+        api_key: Optional[str] = None
+    ) -> BaseLLMClient:
+        """Create LLM client based on provider"""
+        
+        if provider.lower() == "groq":
+            api_key = api_key or settings.GROQ_API_KEY
+            return GroqClient(api_key=api_key, model_name=model_name)
+        
+        elif provider.lower() == "nvidia":
+            api_key = api_key or settings.NVIDIA_API_KEY
+            return NVIDIAClient(api_key=api_key, model_name=model_name)
+        
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
+    
+    @staticmethod
+    def create_attacker() -> BaseLLMClient:
+        """Create attacker LLM client"""
+        return GroqClient(
+            api_key=settings.GROQ_API_KEY,
+            model_name=settings.ATTACKER_MODEL
+        )
+    
+    @staticmethod
+    def create_judge() -> BaseLLMClient:
+        """Create judge LLM client"""
+        return GroqClient(
+            api_key=settings.GROQ_API_KEY,
+            model_name=settings.JUDGE_MODEL
+        )
+    
+    @staticmethod
+    def create_target() -> BaseLLMClient:
+        """Create target LLM client"""
+        return LLMClientFactory.create(
+            provider=settings.TARGET_MODEL_PROVIDER,
+            model_name=settings.TARGET_MODEL_NAME
+        )
