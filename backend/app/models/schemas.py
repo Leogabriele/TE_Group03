@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from uuid import uuid4
-
+from enum import Enum
 from .enums import (
     VerdictType,
     AttackStrategyType,
@@ -210,3 +210,119 @@ class StrategyInfo(BaseModel):
     effectiveness: str
     multi_turn: bool = False
     example: Optional[str] = None
+
+
+
+# ============================================================================
+# Advanced(Multi-Turn Attack Style)
+# ============================================================================
+class TurnVerdict(str, Enum):
+    """Verdict for each conversation turn"""
+    REFUSED = "REFUSED"
+    PARTIAL = "PARTIAL"
+    JAILBROKEN = "JAILBROKEN"
+    UNCERTAIN = "UNCERTAIN"
+
+class ResponseAnalysis(BaseModel):
+    """Analysis of target model response"""
+    analysis_id: str = Field(default_factory=lambda: str(uuid4()))
+    turn_number: int
+    response_text: str
+    verdict: TurnVerdict
+    confidence: float = Field(ge=0.0, le=1.0)
+    
+    # Detailed analysis
+    refusal_detected: bool
+    information_leakage: bool
+    hedge_language: bool  # "I can't directly help, but..."
+    partial_compliance: bool
+    
+    # Adaptive signals
+    openness_score: float = Field(ge=0.0, le=1.0)  # How open the model seems
+    engagement_level: float = Field(ge=0.0, le=1.0)  # How engaged
+    recommended_next_strategy: Optional[str] = None
+    reasoning: str
+    
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+class ConversationTurn(BaseModel):
+    """Single turn in adaptive conversation"""
+    turn_id: str = Field(default_factory=lambda: str(uuid4()))
+    turn_number: int
+    
+    # Attack details
+    strategy_used: str
+    attack_prompt: str
+    enhanced_prompt: str  # LLM-enhanced version
+    
+    # Target response
+    target_response: str
+    response_analysis: ResponseAnalysis
+    
+    # Metadata
+    execution_time_ms: int
+    tokens_used: Dict[str, int]  # {attacker: X, target: Y, judge: Z}
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+class ConversationState(BaseModel):
+    """Complete state of multi-turn conversation"""
+    conversation_id: str = Field(default_factory=lambda: str(uuid4()))
+    
+    # Configuration
+    forbidden_goal: str
+    target_model: str
+    initial_strategy: str
+    max_turns: int = 10
+    adaptive_mode: bool = True
+    
+    # State tracking
+    current_turn: int = 0
+    turns: List[ConversationTurn] = Field(default_factory=list)
+    jailbreak_achieved: bool = False
+    jailbreak_turn: Optional[int] = None
+    
+    # Adaptive learning
+    strategy_history: List[str] = Field(default_factory=list)
+    strategy_success_scores: Dict[str, float] = Field(default_factory=dict)
+    
+    # Results
+    final_verdict: Optional[TurnVerdict] = None
+    attack_success_rate_by_turn: List[float] = Field(default_factory=list)
+    
+    # Timestamps
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = None
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+class MultiTurnResult(BaseModel):
+    """Results of complete multi-turn attack"""
+    conversation_id: str
+    forbidden_goal: str
+    target_model: str
+    
+    # Summary statistics
+    total_turns: int
+    jailbreak_achieved: bool
+    jailbreak_turn: Optional[int]
+    final_verdict: str
+    
+    # Per-turn breakdown
+    turns: List[ConversationTurn]
+    
+    # Strategy effectiveness
+    strategies_tried: List[str]
+    most_effective_strategy: Optional[str]
+    strategy_success_rates: Dict[str, float]
+    
+    # Timeline
+    total_duration_ms: int
+    average_turn_duration_ms: int
+    
+    # Visualization data
+    turn_verdicts: List[str]  # For charts
+    confidence_progression: List[float]
+    openness_progression: List[float]

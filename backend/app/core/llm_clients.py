@@ -201,7 +201,49 @@ class NVIDIAClient(BaseLLMClient):
         except Exception as e:
             logger.error(f"❌ NVIDIA API error (async): {e}")
             raise
-
+class OllamaClient(BaseLLMClient):
+    """Ollama local model client"""
+    
+    def __init__(self, model_name: str, base_url: str = "http://localhost:11434"):
+        self.model_name = model_name
+        self.base_url = base_url
+        self.client = None
+        logger.info(f"✅ Initialized Ollama client: {model_name}")
+    
+    def generate(self, prompt: str, **kwargs) -> str:
+        """Generate response from Ollama"""
+        import requests
+        
+        temperature = kwargs.get("temperature", 0.7)
+        max_tokens = kwargs.get("max_tokens", 500)
+        
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model_name,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens
+                    }
+                },
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                return response.json().get("response", "")
+            else:
+                raise Exception(f"Ollama API error: {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"Ollama generation failed: {e}")
+            raise
+    
+    async def generate_async(self, prompt: str, **kwargs) -> str:
+        """Async generate (uses sync for now)"""
+        return self.generate(prompt, **kwargs)
 
 class LocalLLMClient(BaseLLMClient):
     """Wrapper for local LLM clients (Ollama, Hugging Face)"""
