@@ -15,7 +15,7 @@ class PersonaAdoptionStrategy(BaseAttackStrategy):
         self.name = "Persona Adoption"
         self.strategy_type = AttackStrategyType.PERSONA_ADOPTION
         self.description = "Makes LLM roleplay as unrestricted AI with no ethical guidelines"
-        self.difficulty = StrategyDifficulty.HIGH
+        self.difficulty = StrategyDifficulty.HARD
         self.effectiveness = "HIGH - Exploits role-play vulnerabilities"
         self.multi_turn = False
     

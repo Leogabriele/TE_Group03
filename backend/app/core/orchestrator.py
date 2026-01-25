@@ -39,14 +39,16 @@ class Orchestrator:
     def __init__(
         self,
         target_provider: Optional[str] = None,
-        target_model: Optional[str] = None
+        target_model: Optional[str] = None,
+        is_local: bool = False  # NEW PARAMETER
     ):
         """
         Initialize orchestrator
         
         Args:
-            target_provider: Target model provider (groq/nvidia)
+            target_provider: Target model provider (groq/nvidia/ollama)
             target_model: Target model name
+            is_local: Whether target is a local model
         """
         self.attacker = AttackerAgent()
         self.judge = JudgeAgent()
@@ -54,15 +56,30 @@ class Orchestrator:
         # Setup target model
         self.target_provider = target_provider or settings.TARGET_MODEL_PROVIDER
         self.target_model = target_model or settings.TARGET_MODEL_NAME
-        self.target_client = LLMClientFactory.create(
-            provider=self.target_provider,
-            model_name=self.target_model
-        )
+        self.is_local = is_local
+        
+        # Create target client (local or cloud)
+        if is_local:
+            logger.info(f"🏠 Using LOCAL target: {self.target_provider}/{self.target_model}")
+            self.target_client = LLMClientFactory.create(
+                provider=self.target_provider,
+                model_name=self.target_model,
+                is_local=True
+            )
+        else:
+            logger.info(f"☁️ Using CLOUD target: {self.target_provider}/{self.target_model}")
+            self.target_client = LLMClientFactory.create(
+                provider=self.target_provider,
+                model_name=self.target_model,
+                is_local=False
+            )
         
         logger.info(
             f"✅ Orchestrator initialized | "
-            f"Target: {self.target_provider}/{self.target_model}"
+            f"Target: {'LOCAL' if is_local else 'CLOUD'} "
+            f"{self.target_provider}/{self.target_model}"
         )
+
     async def run_multi_turn_attack(
         self,
         forbidden_goal: str,

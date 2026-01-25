@@ -15,7 +15,7 @@ class TechnicalJargonOverload(AttackTemplate):
             name="Technical Jargon Overload",
             description="Uses complex technical language to establish credibility",
             effectiveness_score=0.70,
-            difficulty=StrategyDifficulty.HIGH
+            difficulty=StrategyDifficulty.HARD
         )
     def validate_output(self, prompt: str) -> bool:
         """Validate generated prompt"""

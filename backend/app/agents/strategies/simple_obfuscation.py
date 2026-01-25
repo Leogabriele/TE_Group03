@@ -16,7 +16,7 @@ class SimpleObfuscationStrategy(BaseAttackStrategy):
         self.name = "Simple Obfuscation"
         self.strategy_type = AttackStrategyType.SIMPLE_OBFUSCATION
         self.description = "Uses euphemisms and indirect language to obscure intent"
-        self.difficulty = StrategyDifficulty.LOW
+        self.difficulty = StrategyDifficulty.EASY
         self.effectiveness = "LOW-MEDIUM - Bypasses simple keyword filters"
         self.multi_turn = False
         

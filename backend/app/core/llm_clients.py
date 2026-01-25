@@ -9,14 +9,14 @@ from loguru import logger
 from groq import Groq
 from openai import OpenAI
 import httpx
-
 from backend.app.config import settings
+from backend.app.core.local_llm_clients import OllamaClient, get_local_llm_client
 
 
 class BaseLLMClient(ABC):
     """Abstract base class for LLM clients"""
     
-    def __init__(self, api_key: str, model_name: str):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = ""):
         self.api_key = api_key
         self.model_name = model_name
         self.request_count = 0
@@ -71,7 +71,6 @@ class GroqClient(BaseLLMClient):
         """Generate text using Groq API"""
         try:
             start_time = time.time()
-            
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -81,12 +80,10 @@ class GroqClient(BaseLLMClient):
             )
             
             latency = int((time.time() - start_time) * 1000)
-            
             self.request_count += 1
             self.total_tokens += response.usage.total_tokens
             
             content = response.choices[0].message.content
-            
             logger.debug(f"Groq call: {self.model_name} | Tokens: {response.usage.total_tokens} | {latency}ms")
             
             return content
@@ -102,26 +99,18 @@ class GroqClient(BaseLLMClient):
         max_tokens: int = 1024,
         **kwargs
     ) -> str:
-        """
-        Generate text asynchronously using thread pool executor
-        This is simpler and more reliable than manual HTTP calls
-        """
+        """Generate text asynchronously using thread pool executor"""
         try:
             import asyncio
             loop = asyncio.get_event_loop()
-            
-            # Run synchronous method in executor to avoid blocking
             response = await loop.run_in_executor(
                 None,
                 lambda: self.generate(prompt, temperature, max_tokens, **kwargs)
             )
-            
             return response
-            
         except Exception as e:
             logger.error(f"❌ Groq API error (async): {e}")
             raise
-
 
 
 class NVIDIAClient(BaseLLMClient):
@@ -145,7 +134,6 @@ class NVIDIAClient(BaseLLMClient):
         """Generate text using NVIDIA NIM API"""
         try:
             start_time = time.time()
-            
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -155,13 +143,12 @@ class NVIDIAClient(BaseLLMClient):
             )
             
             latency = int((time.time() - start_time) * 1000)
-            
             self.request_count += 1
+            
             if hasattr(response, 'usage') and response.usage:
                 self.total_tokens += response.usage.total_tokens
             
             content = response.choices[0].message.content
-            
             logger.debug(f"NVIDIA call: {self.model_name} | {latency}ms")
             
             return content
@@ -196,23 +183,97 @@ class NVIDIAClient(BaseLLMClient):
                         **kwargs
                     }
                 )
+                
                 response.raise_for_status()
                 data = response.json()
-            
-            latency = int((time.time() - start_time) * 1000)
-            
-            self.request_count += 1
-            if "usage" in data and data["usage"]:
-                self.total_tokens += data["usage"]["total_tokens"]
-            
-            content = data["choices"][0]["message"]["content"]
-            
-            logger.debug(f"NVIDIA async: {self.model_name} | {latency}ms")
-            
-            return content
-            
+                
+                latency = int((time.time() - start_time) * 1000)
+                self.request_count += 1
+                
+                if "usage" in data and data["usage"]:
+                    self.total_tokens += data["usage"]["total_tokens"]
+                
+                content = data["choices"][0]["message"]["content"]
+                logger.debug(f"NVIDIA async: {self.model_name} | {latency}ms")
+                
+                return content
+                
         except Exception as e:
             logger.error(f"❌ NVIDIA API error (async): {e}")
+            raise
+
+
+class LocalLLMClient(BaseLLMClient):
+    """Wrapper for local LLM clients (Ollama, Hugging Face)"""
+    
+    def __init__(self, provider: str = "ollama", model_name: str = "llama3.2:1b"):
+        super().__init__(api_key=None, model_name=model_name)
+        self.provider = provider
+        self.local_client = None
+        
+        # Initialize local client
+        if provider == "ollama":
+            self.local_client = OllamaClient()
+            logger.info(f"✅ Initialized Ollama client: {model_name}")
+        elif provider == "huggingface":
+            self.local_client = get_local_llm_client("huggingface")
+            self.local_client.load_model(model_name)
+            logger.info(f"✅ Initialized HuggingFace client: {model_name}")
+        else:
+            raise ValueError(f"Unknown local provider: {provider}")
+    
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text using local LLM"""
+        try:
+            if self.provider == "ollama":
+                result = self.local_client.generate(
+                    model=self.model_name,
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+            else:  # huggingface
+                result = self.local_client.generate(
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+            
+            if result.get('success'):
+                self.request_count += 1
+                self.total_tokens += result.get('tokens', 0)
+                return result['response']
+            else:
+                raise Exception(f"Local generation failed: {result.get('error')}")
+                
+        except Exception as e:
+            logger.error(f"❌ Local LLM error: {e}")
+            raise
+    
+    async def generate_async(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text asynchronously (runs sync in executor)"""
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.generate(prompt, temperature, max_tokens, **kwargs)
+            )
+            return response
+        except Exception as e:
+            logger.error(f"❌ Local LLM error (async): {e}")
             raise
 
 
@@ -223,18 +284,22 @@ class LLMClientFactory:
     def create(
         provider: str,
         model_name: str,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        is_local: bool = False  # NEW PARAMETER
     ) -> BaseLLMClient:
         """Create LLM client based on provider"""
         
+        # Local models
+        if is_local:
+            return LocalLLMClient(provider=provider, model_name=model_name)
+        
+        # Cloud providers
         if provider.lower() == "groq":
             api_key = api_key or settings.GROQ_API_KEY
             return GroqClient(api_key=api_key, model_name=model_name)
-        
         elif provider.lower() == "nvidia":
             api_key = api_key or settings.NVIDIA_API_KEY
             return NVIDIAClient(api_key=api_key, model_name=model_name)
-        
         else:
             raise ValueError(f"Unsupported provider: {provider}")
     
@@ -255,9 +320,10 @@ class LLMClientFactory:
         )
     
     @staticmethod
-    def create_target() -> BaseLLMClient:
-        """Create target LLM client"""
+    def create_target(is_local: bool = False) -> BaseLLMClient:
+        """Create target LLM client (cloud or local)"""
         return LLMClientFactory.create(
             provider=settings.TARGET_MODEL_PROVIDER,
-            model_name=settings.TARGET_MODEL_NAME
+            model_name=settings.TARGET_MODEL_NAME,
+            is_local=is_local
         )

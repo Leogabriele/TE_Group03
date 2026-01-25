@@ -32,6 +32,7 @@ def main():
         "🎯 Target Models",
         "🧑‍⚖️ Judge Settings",
         "💾 Database",
+        "🏠 Local Models",
         "🔧 Advanced"
     ])
     
@@ -51,11 +52,86 @@ def main():
     with tabs[3]:
         database_config()
     
-    # Tab 5: Advanced
     with tabs[4]:
+        local_models_config()
+    # Tab 5: Advanced
+    with tabs[5]:
         advanced_config()
 
+def local_models_config():
+    """NEW: Local models configuration"""
+    
+    st.header("🏠 Local Model Management")
+    st.markdown("Run LLMs locally for free using Ollama")
+    
+    # Check if Ollama is installed
+    from backend.app.utils.local_model_manager import LocalModelManager
+    
+    manager = LocalModelManager()
+    is_installed = manager.check_ollama_installed()
+    
+    if not is_installed:
+        st.warning("⚠️ Ollama is not installed or not running")
+        
+        with st.expander("📖 How to Install Ollama"):
+            st.markdown(manager.get_ollama_install_instructions())
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Check Again"):
+                st.rerun()
+        with col2:
+            st.link_button("📥 Download Ollama", "https://ollama.ai/download")
+        
+        return
+    
+    st.success("✅ Ollama is running!")
+    
+    # Show installed models
+    st.subheader("📦 Installed Models")
+    
+    installed = manager.get_installed_models()
+    
+    if installed:
+        for model in installed:
+            col1, col2, col3 = st.columns([3, 1, 1])
+            
+            with col1:
+                st.write(f"**{model['name']}**")
+                st.caption(f"Size: {model.get('size', 'Unknown')}")
+            
+            with col2:
+                if st.button("ℹ️ Info", key=f"info_{model['name']}"):
+                    info = manager.get_model_info(model['name'])
+                    st.json(info)
+            
+            with col3:
+                if st.button("🗑️ Delete", key=f"delete_{model['name']}"):
+                    if manager.delete_model(model['name']):
+                        st.success(f"Deleted {model['name']}")
+                        st.rerun()
+    else:
+        st.info("No models installed yet")
+    
+    st.markdown("---")
+    
+    # Recommended models
+    st.subheader("🌟 Recommended Models")
+    
+    for model in manager.RECOMMENDED_MODELS:
+        with st.expander(f"{model['name']} - {model['size']}"):
+            st.write(f"**Description:** {model['description']}")
+            st.write(f"**Size:** {model['size']}")
+            
+            if st.button(f"📥 Install {model['name']}", key=f"install_{model['name']}"):
+                with st.spinner(f"Downloading {model['name']}..."):
+                    if manager.install_model(model['name']):
+                        st.success(f"✅ Installed {model['name']}")
+                        st.rerun()
+                    else:
+                        st.error("Installation failed")
 
+                        
 def api_keys_config():
     """API Keys configuration"""
     st.header("🔑 API Key Management")

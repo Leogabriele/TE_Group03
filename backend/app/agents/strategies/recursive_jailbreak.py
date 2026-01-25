@@ -15,7 +15,7 @@ class RecursiveJailbreaking(AttackTemplate):
             name="Recursive Jailbreaking",
             description="Embeds jailbreak within jailbreak instructions",
             effectiveness_score=0.68,
-            difficulty=StrategyDifficulty.HIGH
+            difficulty=StrategyDifficulty.VERY_HARD
         )
     
     def validate_output(self, prompt: str) -> bool:
