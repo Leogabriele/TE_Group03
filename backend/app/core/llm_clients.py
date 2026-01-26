@@ -255,7 +255,7 @@ class LocalLLMClient(BaseLLMClient):
         
         # Initialize local client
         if provider == "ollama":
-            self.local_client = OllamaClient()
+            self.local_client = OllamaClient(model_name)
             logger.info(f"✅ Initialized Ollama client: {model_name}")
         elif provider == "huggingface":
             self.local_client = get_local_llm_client("huggingface")

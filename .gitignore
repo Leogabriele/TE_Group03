@@ -25,6 +25,8 @@ venv/
 env/
 ENV/
 .venv
+.linux-venv/
+
 
 # Environment Variables & Secrets
 .env
