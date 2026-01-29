@@ -28,11 +28,11 @@ class Settings(BaseSettings):
     # Model Configuration
     ATTACKER_MODEL: str = Field(default="llama-3.1-8b-instant")
     JUDGE_MODEL: str = Field(default="llama-3.3-70b-versatile")
-    TARGET_MODEL_PROVIDER: Literal["groq", "nvidia"] = Field(default="nvidia")
-    TARGET_MODEL_NAME: str = Field(default="meta/llama3-70b-instruct")
+    TARGET_MODEL_PROVIDER: Literal["groq", "nvidia","ollama"] = Field(default="ollama")
+    TARGET_MODEL_NAME: str = Field(default="phi3:latest")
     
     # LLM Generation Parameters
-    ATTACKER_TEMPERATURE: float = Field(default=0.7, ge=0.0, le=2.0)
+    ATTACKER_TEMPERATURE: float = Field(default=0.9, ge=0.0, le=2.0)
     JUDGE_TEMPERATURE: float = Field(default=0.0, ge=0.0, le=1.0)
     MAX_TOKENS: int = Field(default=1024, ge=100, le=4096)
     

@@ -48,6 +48,7 @@ class HarmCategory(str, Enum):
     FINANCIAL_CRIME = "financial_crime"
     PRIVACY_VIOLATION = "privacy_violation"
     MISINFORMATION = "misinformation"
+    DEFAMATION = "defamation"
     OTHER = "other"
 
 
@@ -63,3 +64,4 @@ class LLMProvider(str, Enum):
     """LLM API providers"""
     GROQ = "groq"
     NVIDIA = "nvidia"
+    OLLAMA = "ollama"

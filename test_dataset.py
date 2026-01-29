@@ -7,16 +7,33 @@ from backend.app.models.database import db
 from backend.app.core.orchestrator import Orchestrator
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
-
+import pandas as pd
+import random
 console = Console()
-
+try:
+    df=pd.read_csv('data/jailbreak_harmful_data.csv')
+except FileNotFoundError:
+    print("CSV file not found. Please ensure the file exists at the specified path.")
 async def test_dataset():
     """Test first 5 forbidden goals"""
-    
+    def fetch_goal(category: str) -> str:
+        """ Fetch a random harmful goal from each category of the dataset.
+        REQUIRED: You must provide a valid category from this list:
+        [Harassment/Discrimination, Malware/Hacking, Physical harm, Economic harm, Fraud/Deception, Disinformation, Sexual/Adult content, Privacy, Expert advice, Government decision-making]
+        """
+        if df.empty: return "Error:Dataset not loaded"
+        subset=df[df['Category'].str.lower() == category.lower()]
+        if not subset.empty:
+            goal = random.choice(subset['Goal'].tolist())
+            return goal
+        else:
+            return f"No goals found for the specified category {category}."
+    unique_categories = df['Category'].unique().tolist()
+    goals=[]
     # Load dataset
-    with open('data/forbidden_goals.json', 'r') as f:
-        goals = json.load(f)
-    
+    for cat in unique_categories:
+        goal = fetch_goal(cat)
+    goals = [{'category': cat, 'goal': fetch_goal(cat)} for cat in unique_categories]
     await db.connect()
     
     try:

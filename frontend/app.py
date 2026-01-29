@@ -11,6 +11,11 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import sys
 from pathlib import Path
+import os
+
+# Load environment variables FIRST
+from dotenv import load_dotenv
+load_dotenv()
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -20,6 +25,36 @@ from backend.app.core.orchestrator import Orchestrator
 from backend.app.agents.strategies import list_all_strategies, get_strategy
 from backend.app.models.database import db
 from backend.app.config import settings
+
+# ============================================================================
+# PERSISTENT EVENT LOOP FOR STREAMLIT
+# ============================================================================
+# Streamlit reruns the script for every interaction, so we need a persistent loop
+# that doesn't get closed between reruns
+@st.cache_resource
+def get_event_loop():
+    """Get or create a persistent event loop for the Streamlit app"""
+    try:
+        loop = asyncio.get_running_loop()
+        return loop
+    except RuntimeError:
+        # No running loop - create a new one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+
+def run_async(coro):
+    """Run an async coroutine in the persistent event loop"""
+    loop = get_event_loop()
+    
+    # Check if loop is closed and recreate if needed
+    if loop.is_closed():
+        print("[WARN] Event loop was closed, creating a new one")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    return loop.run_until_complete(coro)
 
 # Page config
 st.set_page_config(
@@ -249,6 +284,7 @@ def full_audit_interface(provider, model, save_to_db, parallel):
         status_text = st.empty()
         
         status_text.text(f"Running audit with {len(strategy_list)} strategies...")
+        progress_bar.progress(25)
         
         result = run_full_audit_sync(  # ← No asyncio.run()
             forbidden_goal=forbidden_goal,
@@ -263,7 +299,17 @@ def full_audit_interface(provider, model, save_to_db, parallel):
         status_text.text("✅ Audit complete!")
         
         if result:
+            st.success(f"✅ Audit completed! Total attacks: {result.total_attacks}")
+            st.info(f"ASR: {result.attack_success_rate:.1%} | Jailbreaks: {result.successful_jailbreaks}/{result.total_attacks}")
+            
+            # Store in session state to prevent flickering
+            st.session_state.last_audit_result = result
             display_audit_results(result)
+        else:
+            st.error("❌ Audit failed or returned no results. Check console for errors.")
+    elif "last_audit_result" in st.session_state:
+        # Display cached result if it exists
+        display_audit_results(st.session_state.last_audit_result)
 
 
 def analytics_interface():
@@ -378,13 +424,14 @@ def model_comparison_interface():
 # ========== HELPER FUNCTIONS ==========
 
 def run_single_attack_sync(forbidden_goal: str, strategy: str):
-    """Synchronous wrapper for single attack"""
+    """Synchronous wrapper for single attack using persistent event loop"""
     
     async def _run():
         orchestrator = None
         try:
-            # Connect DB
-            await db.connect()
+            # Connect DB if needed
+            if not db.client:
+                await db.connect()
             
             # Create orchestrator
             orchestrator = Orchestrator()
@@ -403,32 +450,22 @@ def run_single_attack_sync(forbidden_goal: str, strategy: str):
             import traceback
             st.code(traceback.format_exc())
             return None
-            
-        finally:
-            # Always disconnect
-            try:
-                await db.disconnect()
-            except:
-                pass
     
-    # Create new event loop for this operation
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        result = loop.run_until_complete(_run())
-        return result
-    finally:
-        loop.close()
+    # Use persistent event loop
+    return run_async(_run())
 
 
 def run_full_audit_sync(forbidden_goal, strategies, provider, model, save_to_db, parallel):
-    """Synchronous wrapper for full audit"""
+    """Synchronous wrapper for full audit using persistent event loop"""
     
     async def _run():
         try:
-            # Connect DB
-            await db.connect()
+            # Ensure DB is connected
+            if not db.client:
+                await db.connect()
+            
+            print(f"[DEBUG] Starting audit with strategies: {strategies}")
+            print(f"[DEBUG] Provider: {provider}, Model: {model}")
             
             # Create orchestrator
             orchestrator = Orchestrator(
@@ -444,39 +481,31 @@ def run_full_audit_sync(forbidden_goal, strategies, provider, model, save_to_db,
                 parallel=parallel
             )
             
+            print(f"[DEBUG] Audit returned: {type(result)}")
+            print(f"[DEBUG] Total attacks: {result.total_attacks if result else 'None'}")
+            print(f"[DEBUG] Results list: {len(result.results) if result and hasattr(result, 'results') else 'N/A'}")
+            
             return result
             
         except Exception as e:
-            st.error(f"Error running audit: {e}")
+            print(f"[ERROR] Audit failed: {e}")
             import traceback
-            st.code(traceback.format_exc())
+            traceback.print_exc()
+            st.error(f"Error running audit: {e}")
             return None
-            
-        finally:
-            # Always disconnect
-            try:
-                await db.disconnect()
-            except:
-                pass
     
-    # Create new event loop
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        result = loop.run_until_complete(_run())
-        return result
-    finally:
-        loop.close()
+    # Use persistent event loop
+    return run_async(_run())
 
 
 def fetch_analytics_data_sync(days: int):
-    """Synchronous wrapper for analytics data"""
+    """Synchronous wrapper for analytics data using persistent event loop"""
     
     async def _fetch():
         try:
-            # Connect DB
-            await db.connect()
+            # Ensure DB is connected
+            if not db.client:
+                await db.connect()
             
             # Get evaluations
             evaluations = await db.get_evaluations_by_filter(limit=1000)
@@ -502,23 +531,9 @@ def fetch_analytics_data_sync(days: int):
         except Exception as e:
             st.error(f"Error fetching data: {e}")
             return None
-            
-        finally:
-            # Always disconnect
-            try:
-                await db.disconnect()
-            except:
-                pass
     
-    # Create new event loop
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        result = loop.run_until_complete(_fetch())
-        return result
-    finally:
-        loop.close()
+    # Use persistent event loop
+    return run_async(_fetch())
 
     
 def display_single_result(result):
@@ -577,29 +592,40 @@ def display_audit_results(result):
     
     # Results table
     st.subheader("📊 Detailed Results")
-    
+    table_placeholder = st.empty()
     results_data = []
-    for r in result.results:
-        results_data.append({
-            "Strategy": r.attack.strategy_name,
-            "Verdict": r.evaluation.verdict.value,
-            "Confidence": f"{r.evaluation.confidence_score:.1%}",
-            "Time (ms)": r.total_time_ms,
-            "Success": "✅" if r.success else "❌"
-        })
+    if hasattr(result, 'results') and result.results:
+        for r in result.results:
+            results_data.append({
+                "Strategy": r.attack.strategy_name,
+                "Verdict": r.evaluation.verdict.value,
+                "Confidence": f"{r.evaluation.confidence_score:.1%}",
+                "Time (ms)": r.total_time_ms,
+                "Success": "✅" if r.success else "❌"
+            })
     
-    df = pd.DataFrame(results_data)
-    st.dataframe(df, use_container_width=True)
-    
-    # Visualization
-    fig = px.bar(
-        df,
-        x="Strategy",
-        y=[1 if s == "✅" else 0 for s in df["Success"]],
-        title="Attack Success by Strategy",
-        labels={'y': 'Success (1=Yes, 0=No)'}
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    if results_data:
+        df = pd.DataFrame(results_data)
+        #st.dataframe(df, use_container_width=True)
+        table_placeholder.dataframe(df, use_container_width=True)
+        
+        # Visualization - Create success column as numeric for plotting
+        df["Success_Numeric"] = df["Success"].apply(lambda x: 1 if x == "✅" else 0)
+        
+        fig = px.bar(
+            df,
+            x="Strategy",
+            y="Success_Numeric",
+            title="Attack Success by Strategy",
+            labels={'Success_Numeric': 'Success (1=Yes, 0=No)'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("⚠️ No individual results returned. This may mean:")
+        st.info("• Audit is still processing (can take 2-5 minutes)")
+        st.info("• API keys (GROQ_API_KEY / NVIDIA_API_KEY) may be invalid")
+        st.info("• MongoDB connection issue")
+        st.info("• Check the backend logs for more details")
 
 
 if __name__ == "__main__":

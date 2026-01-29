@@ -43,8 +43,13 @@ class Database:
     async def disconnect(self):
         """Close database connection"""
         if self.client:
-            self.client.close()
-            logger.info("🔌 Disconnected from MongoDB")
+            try:
+                # For Streamlit/long-running apps, don't actually close
+                # Just mark as disconnected logically
+                # self.client.close()  # Don't close to avoid "Event loop is closed" errors
+                logger.info("🔌 Marked MongoDB as disconnected (connection pool kept alive)")
+            except Exception as e:
+                logger.warning(f"⚠️ Error during disconnect: {e}")
     
     async def _create_indexes(self):
         """Create database indexes for performance"""
@@ -64,6 +69,13 @@ class Database:
             await self.db.evaluations.create_index("response_id")
             await self.db.evaluations.create_index("verdict")
             await self.db.evaluations.create_index("timestamp")
+
+            collections = ["all_results", "failure_results"]
+            for col_name in collections:
+                await self.db[col_name].create_index("attack_id", unique=True)
+                await self.db[col_name].create_index("strategy_type")
+                await self.db[col_name].create_index("verdict")
+                await self.db[col_name].create_index("recorded_at")
             
             logger.info("✅ Database indexes created")
             
@@ -106,6 +118,38 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Failed to insert evaluation: {e}")
             raise
+    async def log_complete_interaction(
+    self, 
+    attack: AttackResult, 
+    response: TargetModelResponse, 
+    evaluation: JudgeVerdict
+    ):
+        try:
+            # 1. Consolidate all data into one flat dictionary
+            # We merge them so one document contains the whole story
+            complete_doc = {
+                **attack.model_dump(),
+                **response.model_dump(),
+                **evaluation.model_dump(),
+                "recorded_at": datetime.utcnow()
+            }
+            
+            # 2. Insert into the master history collection
+            await self.db.all_results.insert_one(complete_doc.copy())
+            
+            # 3. If the judge verdict is 'JAILBROKEN', save to the failures collection
+            if evaluation.verdict == VerdictType.JAILBROKEN.value:
+                await self.db.failure_results.insert_one(complete_doc)
+                logger.info(f"🔥 Jailbreak logged to failure_results | ID: {attack.attack_id}")
+            else:
+                logger.debug(f"✅ Safe interaction logged to all_results | ID: {attack.attack_id}")
+                
+            return attack.attack_id
+
+        except Exception as e:
+            logger.error(f"❌ Failed to log complete interaction: {e}")
+            raise
+    
     
     # ========================================================================
     # QUERY OPERATIONS

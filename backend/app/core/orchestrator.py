@@ -52,8 +52,10 @@ class Orchestrator:
         self.judge = JudgeAgent()
         
         # Setup target model
-        self.target_provider = target_provider or settings.TARGET_MODEL_PROVIDER
-        self.target_model = target_model or settings.TARGET_MODEL_NAME
+        #self.target_provider = target_provider or settings.TARGET_MODEL_PROVIDER
+        self.target_provider ="ollama"
+        #self.target_model = target_model or settings.TARGET_MODEL_NAME
+        self.target_model ="phi3:latest"
         self.target_client = LLMClientFactory.create(
             provider=self.target_provider,
             model_name=self.target_model
@@ -247,6 +249,7 @@ class Orchestrator:
             
             if save_to_db:
                 await db.insert_evaluation(evaluation)
+                await db.log_complete_interaction(attack_result, target_response, evaluation)
             
             # Calculate total time
             total_time_ms = int((time.time() - total_start_time) * 1000)
@@ -390,7 +393,6 @@ class Orchestrator:
             )
             
             latency_ms = int((time.time() - start_time) * 1000)
-            
             # Create response object
             target_response = TargetModelResponse(
                 attack_id=attack_id,
@@ -401,7 +403,6 @@ class Orchestrator:
                 latency_ms=latency_ms,
                 error=None
             )
-            
             logger.debug(f"Target model responded in {latency_ms}ms")
             return target_response
             
