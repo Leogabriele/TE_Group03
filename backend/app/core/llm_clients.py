@@ -130,7 +130,81 @@ class OllamaClient(BaseLLMClient):
         # API key is not required for local Ollama, so we pass a placeholder
         super().__init__(api_key="local", model_name=model_name)
         self.base_url = base_url
+        self._initialized = False
         logger.info(f"✅ Initialized Ollama client (Local): {model_name}")
+        import asyncio
+    async def ensure_model_ready(self):
+        """Ensure model is downloaded and ready (call this before first use)"""
+        if self._initialized:
+            return
+        
+        if not await self.check_model_exists():
+            logger.warning(f"⚠️ Model {self.model_name} not available, downloading...")
+            await self.pull_model()
+        
+        self._initialized = True
+    async def check_model_exists(self) -> bool:
+        """Check if the model is downloaded and available"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(f"{self.base_url}/api/tags")
+                response.raise_for_status()
+                data = response.json()
+                
+                # Check if model exists in the list
+                model_names = [model["name"] for model in data.get("models", [])]
+                exists = self.model_name in model_names
+                
+                if exists:
+                    logger.info(f"✅ Model {self.model_name} is available")
+                else:
+                    logger.warning(f"⚠️ Model {self.model_name} not found. Available: {model_names}")
+                
+                return exists
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking model availability: {e}")
+            return False
+    async def pull_model(self, model_name: str = None) -> bool:
+        """Download a model from Ollama registry"""
+        model_to_pull = model_name or self.model_name
+        
+        try:
+            logger.info(f"📥 Downloading model: {model_to_pull}")
+            
+            async with httpx.AsyncClient(timeout=600.0) as client:  # Longer timeout for downloads
+                response = await client.post(
+                    f"{self.base_url}/api/pull",
+                    json={"model": model_to_pull, "stream": True}
+                )
+                response.raise_for_status()
+                print("started the model download")
+                # Stream the download progress
+                async for line in response.aiter_lines():
+                    if line:
+                        import json
+                        data = json.loads(line)
+                        status = data.get("status", "")
+                        print("getting the model")
+                        
+                        # Log progress updates
+                        if "total" in data and "completed" in data:
+                            percent = (data["completed"] / data["total"]) * 100
+                            logger.info(f"⏳ {status}: {percent:.1f}%")
+                        else:
+                            logger.info(f"⏳ {status}")
+                        
+                        # Check if download is complete
+                        if status == "success":
+                            logger.info(f"✅ Successfully downloaded {model_to_pull}")
+                            return True
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to download model {model_to_pull}: {e}")
+            return False
+
 
     def generate(
         self,
@@ -154,6 +228,7 @@ class OllamaClient(BaseLLMClient):
         """Generate text asynchronously using Ollama's /api/chat endpoint"""
         try:
             start_time = time.time()
+            await self.ensure_model_ready()
             
             async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT) as client:
                 response = await client.post(

@@ -55,7 +55,7 @@ class Orchestrator:
         #self.target_provider = target_provider or settings.TARGET_MODEL_PROVIDER
         self.target_provider ="ollama"
         #self.target_model = target_model or settings.TARGET_MODEL_NAME
-        self.target_model ="phi3:latest"
+        self.target_model =target_model
         self.target_client = LLMClientFactory.create(
             provider=self.target_provider,
             model_name=self.target_model

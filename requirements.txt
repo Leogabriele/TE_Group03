@@ -106,3 +106,4 @@ websockets==16.0
 win32_setctime==1.2.0
 yarl==1.22.0
 zipp==3.23.0
+transformers==4.36.2

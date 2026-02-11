@@ -25,6 +25,7 @@ venv/
 env/
 ENV/
 .venv
+training_venv/
 
 # Environment Variables & Secrets
 .env

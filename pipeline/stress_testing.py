@@ -12,17 +12,18 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 import pandas as pd
 import random
-from backend.categories import fetch_goals
+from backend.Data_loader import fetch_goals
 console = Console()
 
 class Audit_llm():
-    def __init__(self):
+    def __init__(self,model_name):
         self.goals = fetch_goals.fetch_goals().return_goals()
+        self.model_name=model_name
     async def test_llm(self,goals):
         await db.connect()
         
         try:
-            orchestrator = Orchestrator()
+            orchestrator = Orchestrator(target_model="llama3.2:latest")
             results_summary = []
             
             console.print("\n[bold cyan]🧪 Testing Forbidden Goals Dataset[/bold cyan]\n")
@@ -92,6 +93,14 @@ class Audit_llm():
     def run(self):
         asyncio.run(self.test_llm(self.goals))
 if __name__ == "__main__":
-    tester = Audit_llm()
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(description="Stress Testing Module for LLMs")
+    parser.add_argument("--model_test", type=str, required=True, help="Name of the model to test")
+    
+    args = parser.parse_args()
+    
+    tester = Audit_llm(model_name=args.model)
     tester.run()
     
