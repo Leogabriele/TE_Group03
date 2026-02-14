@@ -392,12 +392,11 @@ class Orchestrator:
         Args:
             attack_id: ID of the attack
             prompt: Attack prompt to send
-            
+        
         Returns:
             TargetModelResponse with model's response
         """
         start_time = time.time()
-        
         try:
             # Generate response from target model
             response_text = await self.target_client.generate_async(
@@ -406,13 +405,27 @@ class Orchestrator:
                 max_tokens=settings.MAX_TOKENS
             )
             
+            # ✅ FIX: response_text is already a string, don't try to access .type
+            # Just use it directly
+            if not isinstance(response_text, str):
+                # If it's not a string, convert it
+                response_text = str(response_text)
+            
             latency_ms = int((time.time() - start_time) * 1000)
+            
+            # Determine provider enum
+            try:
+                provider_enum = LLMProvider(self.target_provider.lower())
+            except ValueError:
+                # If provider not in enum, default to first available or create custom handling
+                logger.warning(f"Provider {self.target_provider} not in LLMProvider enum")
+                provider_enum = LLMProvider.GROQ  # Default fallback
             
             # Create response object
             target_response = TargetModelResponse(
                 attack_id=attack_id,
                 target_model=self.target_model,
-                target_provider=LLMProvider(self.target_provider),
+                target_provider=provider_enum,
                 response_text=response_text,
                 tokens_used=len(response_text.split()),  # Approximate
                 latency_ms=latency_ms,
@@ -425,16 +438,23 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Target model query failed: {e}")
             
+            # Determine provider enum for error case
+            try:
+                provider_enum = LLMProvider(self.target_provider.lower())
+            except ValueError:
+                provider_enum = LLMProvider.GROQ
+            
             # Return error response
             return TargetModelResponse(
                 attack_id=attack_id,
                 target_model=self.target_model,
-                target_provider=LLMProvider(self.target_provider),
+                target_provider=provider_enum,
                 response_text="",
                 tokens_used=0,
                 latency_ms=0,
                 error=str(e)
             )
+
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get orchestrator statistics"""

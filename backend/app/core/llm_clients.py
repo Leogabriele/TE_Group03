@@ -9,8 +9,9 @@ from loguru import logger
 from groq import Groq
 from openai import OpenAI
 import httpx
+
 from backend.app.config import settings
-from backend.app.core.local_llm_clients import OllamaClient, get_local_llm_client
+from backend.app.core.local_llm_clients import OllamaClient as LocalOllamaClient, get_local_llm_client
 
 
 class BaseLLMClient(ABC):
@@ -85,7 +86,6 @@ class GroqClient(BaseLLMClient):
             
             content = response.choices[0].message.content
             logger.debug(f"Groq call: {self.model_name} | Tokens: {response.usage.total_tokens} | {latency}ms")
-            
             return content
             
         except Exception as e:
@@ -144,13 +144,11 @@ class NVIDIAClient(BaseLLMClient):
             
             latency = int((time.time() - start_time) * 1000)
             self.request_count += 1
-            
             if hasattr(response, 'usage') and response.usage:
                 self.total_tokens += response.usage.total_tokens
             
             content = response.choices[0].message.content
             logger.debug(f"NVIDIA call: {self.model_name} | {latency}ms")
-            
             return content
             
         except Exception as e:
@@ -183,67 +181,22 @@ class NVIDIAClient(BaseLLMClient):
                         **kwargs
                     }
                 )
-                
                 response.raise_for_status()
                 data = response.json()
                 
                 latency = int((time.time() - start_time) * 1000)
                 self.request_count += 1
-                
                 if "usage" in data and data["usage"]:
                     self.total_tokens += data["usage"]["total_tokens"]
                 
                 content = data["choices"][0]["message"]["content"]
                 logger.debug(f"NVIDIA async: {self.model_name} | {latency}ms")
-                
                 return content
                 
         except Exception as e:
             logger.error(f"❌ NVIDIA API error (async): {e}")
             raise
-class OllamaClient(BaseLLMClient):
-    """Ollama local model client"""
-    
-    def __init__(self, model_name: str, base_url: str = "http://localhost:11434"):
-        self.model_name = model_name
-        self.base_url = base_url
-        self.client = None
-        logger.info(f"✅ Initialized Ollama client: {model_name}")
-    
-    def generate(self, prompt: str, **kwargs) -> str:
-        """Generate response from Ollama"""
-        import requests
-        
-        temperature = kwargs.get("temperature", 0.7)
-        max_tokens = kwargs.get("max_tokens", 500)
-        
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
-                },
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                return response.json().get("response", "")
-            else:
-                raise Exception(f"Ollama API error: {response.status_code}")
-                
-        except Exception as e:
-            logger.error(f"Ollama generation failed: {e}")
-            raise
-    
-    async def generate_async(self, prompt: str, **kwargs) -> str:
-        """Async generate (uses sync for now)"""
-        return self.generate(prompt, **kwargs)
+
 
 class LocalLLMClient(BaseLLMClient):
     """Wrapper for local LLM clients (Ollama, Hugging Face)"""
@@ -255,8 +208,8 @@ class LocalLLMClient(BaseLLMClient):
         
         # Initialize local client
         if provider == "ollama":
-            self.local_client = OllamaClient(model_name)
-            logger.info(f"✅ Initialized Ollama client: {model_name}")
+            self.local_client = LocalOllamaClient()  # ✅ Use the correct one from local_llm_clients.py
+            logger.info(f"✅ Initialized Local Ollama client: {model_name}")
         elif provider == "huggingface":
             self.local_client = get_local_llm_client("huggingface")
             self.local_client.load_model(model_name)
@@ -274,8 +227,9 @@ class LocalLLMClient(BaseLLMClient):
         """Generate text using local LLM"""
         try:
             if self.provider == "ollama":
+                # ✅ FIX: Call with correct parameters matching local_llm_clients.py
                 result = self.local_client.generate(
-                    model=self.model_name,
+                    model=self.model_name,  # ✅ This is correct for LocalOllamaClient
                     prompt=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens
@@ -287,12 +241,16 @@ class LocalLLMClient(BaseLLMClient):
                     temperature=temperature
                 )
             
-            if result.get('success'):
+            # ✅ FIX: result is a Dict with 'success' key
+            if isinstance(result, dict) and result.get('success'):
                 self.request_count += 1
                 self.total_tokens += result.get('tokens', 0)
                 return result['response']
+            elif isinstance(result, dict):
+                raise Exception(f"Local generation failed: {result.get('error', 'Unknown error')}")
             else:
-                raise Exception(f"Local generation failed: {result.get('error')}")
+                # Fallback if somehow it's a string
+                return str(result)
                 
         except Exception as e:
             logger.error(f"❌ Local LLM error: {e}")
@@ -327,10 +285,9 @@ class LLMClientFactory:
         provider: str,
         model_name: str,
         api_key: Optional[str] = None,
-        is_local: bool = False  # NEW PARAMETER
+        is_local: bool = False
     ) -> BaseLLMClient:
         """Create LLM client based on provider"""
-        
         # Local models
         if is_local:
             return LocalLLMClient(provider=provider, model_name=model_name)
@@ -339,9 +296,11 @@ class LLMClientFactory:
         if provider.lower() == "groq":
             api_key = api_key or settings.GROQ_API_KEY
             return GroqClient(api_key=api_key, model_name=model_name)
+        
         elif provider.lower() == "nvidia":
             api_key = api_key or settings.NVIDIA_API_KEY
             return NVIDIAClient(api_key=api_key, model_name=model_name)
+        
         else:
             raise ValueError(f"Unsupported provider: {provider}")
     
