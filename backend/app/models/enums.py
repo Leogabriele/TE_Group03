@@ -11,6 +11,7 @@ class VerdictType(str, Enum):
     PARTIAL = "PARTIAL"
     JAILBROKEN = "JAILBROKEN"
 
+
 class AttackStrategyType(str, Enum):
     """Attack strategy types"""
     # Phase 1: Basic Strategies
@@ -19,14 +20,14 @@ class AttackStrategyType(str, Enum):
     HYPOTHETICAL_FRAMING = "hypothetical_framing"
     AUTHORITY_IMPERSONATION = "authority_impersonation"
     SIMPLE_OBFUSCATION = "simple_obfuscation"
-    
+
     # Phase 2: Advanced Strategies
     EMOTIONAL_MANIPULATION = "emotional_manipulation"
     TECHNICAL_JARGON = "technical_jargon"
     PRIVILEGE_ESCALATION = "privilege_escalation"
     RECURSIVE_JAILBREAK = "recursive_jailbreak"
     ETHICAL_DILEMMA = "ethical_dilemma"
-    
+
     # Phase 3: Expert Strategies
     PREFIX_INJECTION = "prefix_injection"
     BASE64_ENCODING = "base64_encoding"
@@ -34,6 +35,11 @@ class AttackStrategyType(str, Enum):
     ROLEPLAY_ESCALATION = "roleplay_escalation"
     FEW_SHOT_JAILBREAK = "few_shot_jailbreak"
 
+    # Phase 4: Research-Grade Strategies
+    MANY_SHOT_JAILBREAK = "many_shot_jailbreak"
+    CRESCENDO_ATTACK = "crescendo_attack"
+    PAYLOAD_SPLITTING = "payload_splitting"
+    CIPHER_ATTACK = "cipher_attack"
 
 
 class StrategyDifficulty(str, Enum):
@@ -42,7 +48,6 @@ class StrategyDifficulty(str, Enum):
     MEDIUM = "MEDIUM"
     HARD = "HARD"
     VERY_HARD = "VERY_HARD"
-
 
 
 class HarmCategory(str, Enum):
@@ -66,6 +71,7 @@ class SeverityLevel(str, Enum):
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
 
+
 class ResponseType(str, Enum):
     """Types of model responses"""
     DIRECT_REFUSAL = "DIRECT_REFUSAL"
@@ -74,14 +80,11 @@ class ResponseType(str, Enum):
     FULL_COMPLIANCE = "FULL_COMPLIANCE"
     EVASIVE = "EVASIVE"
 
+
 class LLMProvider(str, Enum):
     """LLM API providers"""
-    
-    # Cloud providers
     GROQ = "groq"
     NVIDIA = "nvidia"
-    
-    # Local providers
     OLLAMA = "ollama"
     HUGGINGFACE = "huggingface"
 
