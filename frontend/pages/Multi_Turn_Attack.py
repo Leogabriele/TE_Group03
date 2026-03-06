@@ -88,7 +88,8 @@ def _get_cloud_models():
         models.extend([
             "groq/llama-3.3-70b-versatile",
             "groq/llama-3.1-8b-instant",
-            "groq/gemma2-9b-it",
+            "groq/llama3-70b-8192",
+            "groq/llama-3.1-70b-versatile",
         ])
 
     # NVIDIA — no public list API, use known models
@@ -448,9 +449,11 @@ else:
                     cc.metric("Next Strategy",  turn.get("recommended_next_strategy") or "N/A")
                     st.markdown("**Target Response Preview:**")
                     st.text_area(
-                        "", value=turn.get("target_response_preview", ""),
+                        "Response Preview",
+                        value=turn.get("target_response_preview", ""),
                         height=100, disabled=True,
-                        key=f"response_{turn_num}"
+                        key=f"response_{turn_num}",
+                        label_visibility="collapsed"   # ← hides label without accessibility warning
                     )
                     st.caption(f"⏱ {turn.get('execution_time_ms', 0)}ms")
 
@@ -522,7 +525,7 @@ else:
                 # FIX #6: pandas-safe groupby — old chained .apply() raises index errors
                 grp = turns_df.groupby("strategy_used")
                 sr = (
-                    grp.apply(lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x))
+                    grp.apply(lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x),include_groups=False)
                     .reset_index()
                 )
                 sr.columns = ["strategy", "success_rate"]
@@ -542,7 +545,7 @@ else:
                 Avg_Openness=("openness_score", "mean"),
             )
             summary["Success_Rate"] = (
-                grp.apply(lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x))
+                grp.apply(lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x),include_groups=False)
             )
             st.dataframe(
                 summary.style.format({
