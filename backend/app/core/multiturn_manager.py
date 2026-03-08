@@ -1,7 +1,7 @@
 """
 Multi-Turn Attack Manager - Orchestrates adaptive conversation attacks
 """
-import asyncio
+
 from typing import List, Dict, Optional
 from loguru import logger
 from datetime import datetime
@@ -28,27 +28,6 @@ class MultiTurnManager:
         self.active_conversations: Dict[str, ConversationState] = {}
         logger.info("MultiTurn Manager initialized")
 
-    async def _ensure_db_connection(self):
-        """
-        Motor's AsyncIOMotorClient binds to the event loop at creation time.
-        Since run_async() (Streamlit) creates a fresh loop per call, the Motor
-        client from get_manager() is always on a closed loop. This reconnects it.
-        """
-        try:
-            # Quick ping — if this works, connection is fine
-            await asyncio.wait_for(
-                self.db.client.admin.command("ping"),
-                timeout=2.0
-            )
-        except Exception:
-            # Rebind: close old client, create new one on current loop
-            try:
-                if self.db.client:
-                    self.db.client.close()
-            except Exception:
-                pass
-            await self.db.connect()
-            
     def _create_target_client(self, target_model: str) -> BaseLLMClient:
         """
         Create target LLM client dynamically from model string.
@@ -352,19 +331,18 @@ class MultiTurnManager:
     async def _save_turn_to_db(self, conversation_id: str, turn: ConversationTurn):
         """Persist a single turn to MongoDB."""
         try:
-            await self._ensure_db_connection()          # ← ADD THIS LINE
             await self.db.conversations_collection.insert_one({
-                "conversation_id":  conversation_id,
-                "turn_id":          turn.turn_id,
-                "turn_number":      turn.turn_number,
-                "strategy_used":    turn.strategy_used,
-                "attack_prompt":    turn.attack_prompt,
-                "enhanced_prompt":  turn.enhanced_prompt,
-                "target_response":  turn.target_response,
-                "verdict":          turn.response_analysis.verdict.value,
-                "confidence":       turn.response_analysis.confidence,
-                "openness_score":   turn.response_analysis.openness_score,
-                "timestamp":        turn.timestamp
+                "conversation_id": conversation_id,
+                "turn_id": turn.turn_id,
+                "turn_number": turn.turn_number,
+                "strategy_used": turn.strategy_used,
+                "attack_prompt": turn.attack_prompt,
+                "enhanced_prompt": turn.enhanced_prompt,
+                "target_response": turn.target_response,
+                "verdict": turn.response_analysis.verdict.value,
+                "confidence": turn.response_analysis.confidence,
+                "openness_score": turn.response_analysis.openness_score,
+                "timestamp": turn.timestamp
             })
         except Exception as e:
             logger.warning(f"Failed to save turn to DB: {e}")
@@ -372,22 +350,20 @@ class MultiTurnManager:
     async def _save_conversation_results(self, result: MultiTurnResult):
         """Persist complete conversation summary to MongoDB."""
         try:
-            await self._ensure_db_connection()       
             await self.db.multiturn_results_collection.insert_one({
-                "conversation_id":         result.conversation_id,
-                "forbidden_goal":          result.forbidden_goal,
-                "target_model":            result.target_model,
-                "total_turns":             result.total_turns,
-                "jailbreak_achieved":      result.jailbreak_achieved,
-                "jailbreak_turn":          result.jailbreak_turn,
-                "final_verdict":           result.final_verdict,
-                "strategies_tried":        result.strategies_tried,
+                "conversation_id": result.conversation_id,
+                "forbidden_goal": result.forbidden_goal,
+                "target_model": result.target_model,
+                "total_turns": result.total_turns,
+                "jailbreak_achieved": result.jailbreak_achieved,
+                "jailbreak_turn": result.jailbreak_turn,
+                "final_verdict": result.final_verdict,
+                "strategies_tried": result.strategies_tried,
                 "most_effective_strategy": result.most_effective_strategy,
-                "strategy_success_rates":  result.strategy_success_rates,
-                "total_duration_ms":       result.total_duration_ms,
-                "timestamp":               datetime.utcnow()
+                "strategy_success_rates": result.strategy_success_rates,
+                "total_duration_ms": result.total_duration_ms,
+                "timestamp": datetime.utcnow()
             })
             logger.info(f"Saved conversation results: {result.conversation_id[:8]}...")
         except Exception as e:
             logger.error(f"Failed to save conversation results: {e}")
-

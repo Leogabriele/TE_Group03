@@ -37,7 +37,8 @@ ENV/
 # Configuration with secrets
 config/advanced_settings.json
 config/*.json
-
+unsloth_compiled_cache
+models/tinyllama-1.1b-safe
 # IDE
 .vscode/
 .idea/
