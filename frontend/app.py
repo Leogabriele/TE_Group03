@@ -691,7 +691,7 @@ def display_audit_results(result):
         labels={"y": "Success (1=Yes, 0=No)"}
     )
     st.plotly_chart(fig, use_container_width=True)
-
+ 
 
 # ─── Sync wrappers ────────────────────────────────────────────────────────────
 

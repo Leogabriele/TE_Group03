@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         description="Ollama model to use as last-resort attacker fallback"
     )
     ATTACKER_FALLBACKS: str = Field(
-        default="groq/llama-3.1-8b-instant,groq/gemma2-9b-it",
+        default="groq/llama-3.1-8b-instant,openai/gpt-oss-120b",
         description=(
             "Comma-separated list of provider/model pairs for attacker fallback chain. "
             "Example: groq/llama-3.1-8b-instant,nvidia/meta/llama3-70b-instruct,ollama/llama3.2:latest"

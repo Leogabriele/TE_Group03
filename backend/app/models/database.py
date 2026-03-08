@@ -33,6 +33,10 @@ class Database:
     async def connect(self):
         """Establish database connection"""
         try:
+            if self.client is not None:
+                self.client.close()
+                self.client = None
+
             self.client = AsyncIOMotorClient(
                 settings.MONGODB_URI,
                 serverSelectionTimeoutMS=5000
@@ -65,6 +69,7 @@ class Database:
         """Close database connection"""
         if self.client:
             self.client.close()
+            self.client = None
             logger.info("🔌 Disconnected from MongoDB")
     
     async def _create_indexes(self):
