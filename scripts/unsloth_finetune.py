@@ -18,7 +18,7 @@ Usage (called programmatically):
 import argparse
 import json
 from pathlib import Path
-
+import requests
 from datasets import load_dataset
 from unsloth import FastLanguageModel
 from transformers import TrainingArguments
