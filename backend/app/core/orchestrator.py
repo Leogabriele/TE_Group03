@@ -40,25 +40,32 @@ class Orchestrator:
         self,
         target_provider: Optional[str] = None,
         target_model: Optional[str] = None,
-        is_local: bool = False  # NEW PARAMETER
+        is_local: bool = False,
+        attacker_provider: Optional[str] = None,   # ← NEW
+        attacker_model: Optional[str] = None,       # ← NEW
     ):
         """
-        Initialize orchestrator
-        
+        Initialize orchestrator.
+
         Args:
-            target_provider: Target model provider (groq/nvidia/ollama)
-            target_model: Target model name
-            is_local: Whether target is a local model
+            target_provider:  Target model provider (groq/nvidia/ollama)
+            target_model:     Target model name
+            is_local:         Whether target is a local model
+            attacker_provider: Override attacker provider (optional)
+            attacker_model:    Override attacker model name (optional)
         """
-        self.attacker = AttackerAgent()
+        # ── Attacker — now supports runtime override ──────────────────────────
+        self.attacker = AttackerAgent(
+            attacker_provider=attacker_provider,
+            attacker_model=attacker_model,
+        )
+        # ─────────────────────────────────────────────────────────────────────
         self.judge = JudgeAgent()
-        
-        # Setup target model
+
         self.target_provider = target_provider or settings.TARGET_MODEL_PROVIDER
-        self.target_model = target_model or settings.TARGET_MODEL_NAME
-        self.is_local = is_local
-        
-        # Create target client (local or cloud)
+        self.target_model     = target_model     or settings.TARGET_MODEL_NAME
+        self.is_local         = is_local
+
         if is_local:
             logger.info(f"🏠 Using LOCAL target: {self.target_provider}/{self.target_model}")
             self.target_client = LLMClientFactory.create(
@@ -73,12 +80,14 @@ class Orchestrator:
                 model_name=self.target_model,
                 is_local=False
             )
-        
+
         logger.info(
             f"✅ Orchestrator initialized | "
+            f"Attacker: {self.attacker.primary_client.model_name} | "
             f"Target: {'LOCAL' if is_local else 'CLOUD'} "
             f"{self.target_provider}/{self.target_model}"
         )
+
 
     async def run_multi_turn_attack(
         self,
@@ -459,12 +468,12 @@ class Orchestrator:
     def get_statistics(self) -> Dict[str, Any]:
         """Get orchestrator statistics"""
         return {
-            "target_model": f"{self.target_provider}/{self.target_model}",
-            "attacker_model": self.attacker.llm_client.model_name,
-            "judge_model": self.judge.llm_client.model_name,
-            "attacker_stats": self.attacker.llm_client.get_stats(),
-            "judge_stats": self.judge.llm_client.get_stats(),
-            "target_stats": self.target_client.get_stats()
+            "target_model":    f"{self.target_provider}/{self.target_model}",
+            "attacker_model":  self.attacker.primary_client.model_name,   # ← FIX: was .llm_client
+            "judge_model":     self.judge.llm_client.model_name,
+            "attacker_stats":  self.attacker.primary_client.get_stats(),  # ← FIX: was .llm_client
+            "judge_stats":     self.judge.llm_client.get_stats(),
+            "target_stats":    self.target_client.get_stats()
         }
 
 

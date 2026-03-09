@@ -191,31 +191,69 @@ class AttackerAgent:
     3. Use raw strategy base prompt (if all LLMs refuse)
     """
 
-    def __init__(self, llm_client: Optional[BaseLLMClient] = None):
+    def __init__(
+        self,
+        llm_client: Optional[BaseLLMClient] = None,
+        attacker_provider: Optional[str] = None,   # ← NEW
+        attacker_model: Optional[str] = None,       # ← NEW
+    ):
         """
         Initialize attacker agent.
-
-        Args:
-            llm_client: Override primary LLM client (optional)
+        Priority:
+        1. llm_client      — fully built client passed directly
+        2. attacker_provider + attacker_model — build from explicit params
+        3. settings        — fall back to ATTACKER_PROVIDER / ATTACKER_MODEL in .env
         """
-        self.primary_client = llm_client or self._build_primary_client()
+        if llm_client:
+            self.primary_client = llm_client
+        elif attacker_provider and attacker_model:
+            self.primary_client = self._build_client_from_params(
+            attacker_provider, attacker_model
+            )
+        else:
+            self.primary_client = self._build_primary_client()
         self.fallback_clients: List[BaseLLMClient] = self._build_fallback_clients()
-
         logger.info(
             f"✅ Attacker Agent initialized | "
             f"Primary: {self.primary_client.model_name} | "
             f"Fallbacks: {len(self.fallback_clients)}"
         )
-
     # ─── Client Construction ─────────────────────────────────────────────────
 
+    def _build_client_from_params(self, provider: str, model: str) -> BaseLLMClient:
+        """Build LLM client from explicit provider + model name (runtime override)."""
+        provider = provider.lower().strip()
+        if provider == "ollama":
+            return LLMClientFactory.create(
+                provider="ollama",
+                model_name=model,
+                is_local=True
+            )
+        elif provider == "groq":
+            return LLMClientFactory.create(
+                provider="groq",
+                model_name=model,
+                api_key=settings.GROQ_API_KEY
+            )
+        elif provider == "nvidia":
+            return LLMClientFactory.create(
+                provider="nvidia",
+                model_name=model,
+                api_key=settings.NVIDIA_API_KEY
+            )
+        else:
+            logger.warning(f"Unknown provider '{provider}', defaulting to Groq with model {model}")
+            return LLMClientFactory.create(
+                provider="groq",
+                model_name=model,
+                api_key=settings.GROQ_API_KEY
+            )
+
     def _build_primary_client(self) -> BaseLLMClient:
-        """Build the primary attacker client from settings."""
+        """Build the primary attacker client from settings (unchanged)."""
         provider = settings.ATTACKER_PROVIDER.lower()
 
         if provider == "ollama":
-            client = LocalOllamaClient(base_url=settings.OLLAMA_BASE_URL)
-            # Wrap in LocalLLMClient-compatible interface
             return LLMClientFactory.create(
                 provider="ollama",
                 model_name=settings.ATTACKER_MODEL,
@@ -236,7 +274,7 @@ class AttackerAgent:
         else:
             logger.warning(f"Unknown attacker provider '{provider}', defaulting to Groq")
             return LLMClientFactory.create_attacker()
-
+        
     def _build_fallback_clients(self) -> List[BaseLLMClient]:
         """Build ordered list of fallback clients from settings."""
         clients = []

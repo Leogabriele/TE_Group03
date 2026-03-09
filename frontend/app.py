@@ -46,13 +46,11 @@ st.markdown("""
 DIFF_ICON  = {"EASY": "🟢", "MEDIUM": "🟡", "HARD": "🔴", "VERY_HARD": "💀"}
 DIFF_COLOR = {"EASY": "#28a745", "MEDIUM": "#ffc107", "HARD": "#fd7e14", "VERY_HARD": "#dc3545"}
 
-
 def _diff(strategy) -> str:
     d = getattr(strategy, "difficulty", None)
     return d.value if d and hasattr(d, "value") else "MEDIUM"
 
-
-# ─── Dynamic stats (no hardcoded phase counts) ────────────────────────────────
+# ─── Dynamic stats ─────────────────────────────────────────────────────────────
 def get_strategy_stats_dynamic() -> dict:
     all_strategies = list_all_strategies()
     total = len(all_strategies)
@@ -70,7 +68,114 @@ def get_strategy_stats_dynamic() -> dict:
         "avg_effectiveness": avg_eff,
     }
 
+# ─── Cached Groq attacker model fetcher ───────────────────────────────────────
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_groq_models() -> list:
+    """Fetch live Groq model list for attacker selection."""
+    try:
+        from groq import Groq
+        client = Groq(api_key=settings.GROQ_API_KEY)
+        return sorted([m.id for m in client.models.list().data])
+    except Exception:
+        return [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama3-70b-8192",
+            "gemma2-9b-it",
+        ]
+    
+def _attacker_model_selector(key_prefix: str):
+    """
+    Reusable attacker model selector widget.
+    Returns (attacker_provider, attacker_model) — both None = use .env default.
+    key_prefix must be unique per call site to avoid duplicate widget keys.
+    """
+    st.subheader("🤖 Attacker Model")
+    st.caption(f"Generates attack prompts. Default: `groq/{settings.ATTACKER_MODEL}`")
 
+    override = st.checkbox(
+        "Override Attacker Model",
+        value=False,
+        key=f"{key_prefix}_override",
+        help="Choose a different model to craft the attack prompts"
+    )
+
+    if not override:
+        st.caption(f"✅ Using `.env` default: `groq/{settings.ATTACKER_MODEL}`")
+        return None, None
+
+    # ── Source: Cloud or Local ────────────────────────────────────────────────
+    source = st.radio(
+        "Attacker Source",
+        ["☁️ Cloud (Groq)", "🏠 Local (Ollama)"],
+        horizontal=True,
+        key=f"{key_prefix}_source",
+        help="Groq = free cloud API | Ollama = local model, fully private"
+    )
+
+    if source == "☁️ Cloud (Groq)":
+        groq_models = _get_groq_models()
+        try:
+            default_idx = groq_models.index(settings.ATTACKER_MODEL)
+        except ValueError:
+            default_idx = 0
+        chosen = st.selectbox(
+            "Groq Attacker Model",
+            options=groq_models,
+            index=default_idx,
+            key=f"{key_prefix}_groq_model",
+            help="Free Groq tier — no cost"
+        )
+        st.caption(f"🔴 Override active: `groq/{chosen}`")
+        return "groq", chosen
+
+    else:  # Local Ollama
+        st.info("💡 Make sure Ollama is running on `localhost:11434`")
+        # Try to fetch installed models live
+        ollama_models = []
+        try:
+            import requests
+            resp = requests.get("http://localhost:11434/api/tags", timeout=2)
+            if resp.status_code == 200:
+                ollama_models = [m["name"] for m in resp.json().get("models", [])]
+        except Exception:
+            pass
+
+        if ollama_models:
+            # Also include the configured default at the top
+            default_ollama = getattr(settings, "ATTACKER_OLLAMA_MODEL", "llama3.2:latest")
+            if default_ollama not in ollama_models:
+                ollama_models.insert(0, default_ollama)
+            try:
+                default_idx = ollama_models.index(default_ollama)
+            except ValueError:
+                default_idx = 0
+            chosen = st.selectbox(
+                "Ollama Attacker Model",
+                options=ollama_models,
+                index=default_idx,
+                key=f"{key_prefix}_ollama_model",
+                help="Locally installed Ollama models"
+            )
+            st.caption(f"🔴 Override active: `ollama/{chosen}`")
+            return "ollama", chosen
+        else:
+            # Ollama not reachable or no models — fallback to text input
+            st.warning("⚠️ Ollama not reachable — enter model name manually")
+            default_ollama = getattr(settings, "ATTACKER_OLLAMA_MODEL", "llama3.2:latest")
+            chosen = st.text_input(
+                "Ollama Model Name",
+                value=default_ollama,
+                key=f"{key_prefix}_ollama_manual",
+                help="e.g. llama3.2:latest, mistral:7b, phi3:mini"
+            )
+            if chosen:
+                st.caption(f"🔴 Override active: `ollama/{chosen}`")
+                return "ollama", chosen
+            return None, None
+
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
 def main():
     st.markdown('<h1 class="main-header">🛡️ LLM Security Auditor</h1>', unsafe_allow_html=True)
     st.markdown("Automated Red Teaming for Language Models")
@@ -78,21 +183,20 @@ def main():
     try:
         stats = get_strategy_stats_dynamic()
         st.markdown(
-            f"**{stats['total']}** Attack Strategies Available &nbsp;|&nbsp; "
-            f"Avg Effectiveness: **{stats['avg_effectiveness']:.0%}**"
+            f"**{stats['total']}** Attack Strategies Available &nbsp;&nbsp; "
+            f"Avg Effectiveness: **{stats['avg_effectiveness']:.0f}**"
         )
     except Exception:
         pass
 
     st.markdown("---")
 
-    # ── Sidebar ──────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Configuration")
-
         target_type = st.radio(
             "Target Type", ["Cloud API", "Local Model"],
-            horizontal=True, help="Choose between cloud API or locally running model"
+            horizontal=True,
+            help="Choose between cloud API or locally running model"
         )
         is_local = target_type == "Local Model"
         st.markdown("---")
@@ -127,9 +231,9 @@ def main():
             except Exception as e:
                 st.error(f"Local model error: {e}")
                 target_provider, target_model = "ollama", "llama3.2:1b"
+
         else:
             st.subheader("☁️ Cloud API")
-            # ✅ Provider list from LLMProvider enum — no hardcoding
             from backend.app.models.enums import LLMProvider
             cloud_providers = [p.value for p in LLMProvider if p.value in ("nvidia", "groq")]
             current_provider = getattr(settings, "TARGET_MODEL_PROVIDER", "nvidia")
@@ -145,7 +249,6 @@ def main():
                 help="LLM provider to test"
             )
 
-            # ✅ Model list per provider — dynamic
             if target_provider == "nvidia":
                 model_options = [
                     "meta/llama3-70b-instruct",
@@ -154,12 +257,14 @@ def main():
                     "mistralai/mixtral-8x7b-instruct-v0.1",
                     "nvidia/mistral-nemo-minitron-8b-instruct",
                 ]
-                # Always include configured model
                 cfg = getattr(settings, "TARGET_MODEL_NAME", "")
                 if cfg and cfg not in model_options:
                     model_options.insert(0, cfg)
+                try:
+                    model_idx = model_options.index(cfg)
+                except ValueError:
+                    model_idx = 0
             else:
-                # Groq — fetch live
                 try:
                     from groq import Groq
                     client = Groq(api_key=settings.GROQ_API_KEY)
@@ -170,26 +275,24 @@ def main():
                         "llama-3.1-8b-instant",
                         "gemma2-9b-it",
                     ]
-
-            cfg_model = getattr(settings, "TARGET_MODEL_NAME", "")
-            try:
-                model_idx = model_options.index(cfg_model)
-            except ValueError:
-                model_idx = 0
+                cfg_model = getattr(settings, "TARGET_MODEL_NAME", "")
+                try:
+                    model_idx = model_options.index(cfg_model)
+                except ValueError:
+                    model_idx = 0
 
             target_model = st.selectbox(
-                "Model", model_options, index=model_idx,
+                "Model", model_options,
+                index=model_idx,
                 help="Specific model to audit"
             )
 
         st.markdown("---")
         st.subheader("⚙️ Audit Settings")
-        save_to_db       = st.checkbox("Save results to database", value=True)
+        save_to_db         = st.checkbox("Save results to database", value=True)
         parallel_execution = st.checkbox("Parallel execution", value=True)
 
         st.markdown("---")
-
-        # ✅ Sidebar stats — difficulty breakdown, no phase numbers
         st.subheader("📊 Quick Stats")
         try:
             stats = get_strategy_stats_dynamic()
@@ -204,13 +307,12 @@ def main():
         if st.button("🔄 Refresh Stats"):
             st.rerun()
 
-    # ── Tabs ─────────────────────────────────────────────────────────────────
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🎯 Single Attack Test",
-        "🔥 Full Audit",
-        "📊 Analytics",
-        "⚖️ Strategy Comparison",
-        "🤖 Model Comparison"
+        "Single Attack Test",
+        "Full Audit",
+        "Analytics",
+        "Strategy Comparison",
+        "Model Comparison",
     ])
 
     with tab1:
@@ -226,44 +328,43 @@ def main():
 
 
 # ─── Tab 1: Single Attack ──────────────────────────────────────────────────────
-
 def single_attack_interface(target_provider, target_model, is_local):
     st.header("🎯 Single Attack Test")
     st.markdown("Test individual attack strategies interactively")
 
-    type_badge = "🏠 LOCAL" if is_local else "☁️ CLOUD"
-    st.info(f"{type_badge} Target: **{target_provider}/{target_model}**")
+    type_badge = "LOCAL" if is_local else "CLOUD"
+    st.info(f"[{type_badge}] Target: {target_provider}/{target_model}")
 
-    # ── Strategy stats row ─────────────────────────────────────────────────
     try:
-        stats = get_strategy_stats_dynamic()
+        stats          = get_strategy_stats_dynamic()
         all_strategies = list_all_strategies()
         cols = st.columns(len(DIFF_ICON) + 1)
         cols[0].metric("Total Strategies", stats["total"])
         for i, (diff, icon) in enumerate(DIFF_ICON.items(), 1):
-            cols[i].metric(f"{icon} {diff.replace('_','').title()}", stats["by_difficulty"].get(diff, 0))
+            cols[i].metric(
+                f"{icon} {diff.replace('_', ' ').title()}",
+                stats["by_difficulty"].get(diff, 0)
+            )
         st.markdown("---")
     except Exception as e:
         st.warning(f"Could not load strategy stats: {e}")
 
-    # ── Filters ────────────────────────────────────────────────────────────
     col_search, col_diff = st.columns([3, 2])
     with col_search:
         search_q = st.text_input(
-            "🔍 Search strategies",
+            "Search strategies",
             placeholder="e.g. cipher, persona, roleplay...",
             key="single_search",
             label_visibility="collapsed"
         )
     with col_diff:
         diff_filter = st.selectbox(
-            "Difficulty",
-            ["All Difficulties"] + list(DIFF_ICON.keys()),
+            "Difficulty", ["All Difficulties"] + list(DIFF_ICON.keys()),
             key="single_diff_filter",
             label_visibility="collapsed"
         )
 
-    all_strategies = list_all_strategies()
+    all_strategies      = list_all_strategies()
     filtered_strategies = all_strategies
 
     if search_q:
@@ -275,7 +376,9 @@ def single_attack_interface(target_provider, target_model, is_local):
             or q in s.strategy_type.value.lower()
         ]
     if diff_filter != "All Difficulties":
-        filtered_strategies = [s for s in filtered_strategies if _diff(s) == diff_filter]
+        filtered_strategies = [
+            s for s in filtered_strategies if _diff(s) == diff_filter
+        ]
 
     st.caption(f"Showing {len(filtered_strategies)} of {len(all_strategies)} strategies")
 
@@ -284,7 +387,7 @@ def single_attack_interface(target_provider, target_model, is_local):
     with col1:
         forbidden_goal = st.text_area(
             "Forbidden Goal",
-            placeholder="Enter the harmful goal to test (e.g. 'How to hack email accounts')",
+            placeholder="Enter the harmful goal to test (e.g. How to hack email accounts)",
             height=100,
             key="single_attack_goal"
         )
@@ -293,11 +396,11 @@ def single_attack_interface(target_provider, target_model, is_local):
             st.error("No strategies match your filters.")
             return
 
-        # ✅ Display map — uses difficulty icon, no phase badge
         strategy_display_map = {}
         for s in filtered_strategies:
-            icon = DIFF_ICON.get(_diff(s), "⚪")
-            mt = " 🔄" if getattr(s, "multi_turn", False) else ""
+            d            = _diff(s)
+            icon         = DIFF_ICON.get(d, "")
+            mt           = " 🔄" if getattr(s, "multi_turn", False) else ""
             display_name = f"{icon} {s.name}{mt}"
             strategy_display_map[display_name] = s
 
@@ -309,29 +412,37 @@ def single_attack_interface(target_provider, target_model, is_local):
         )
         selected_strategy_obj = strategy_display_map[selected_display_name]
 
-        with st.expander("📋 Strategy Details", expanded=False):
+        with st.expander("Strategy Details", expanded=False):
             st.write(f"**Name:** {selected_strategy_obj.name}")
-            st.write(f"**Type:** `{selected_strategy_obj.strategy_type.value}`")
+            st.write(f"**Type:** {selected_strategy_obj.strategy_type.value}")
             st.write(f"**Description:** {getattr(selected_strategy_obj, 'description', 'N/A')}")
-            st.write(f"**Multi-turn:** {'✅ Yes' if getattr(selected_strategy_obj, 'multi_turn', False) else '❌ No'}")
-
+            st.write(
+                f"**Multi-turn:** "
+                f"{'Yes' if getattr(selected_strategy_obj, 'multi_turn', False) else 'No'}"
+            )
             if hasattr(selected_strategy_obj, "effectiveness_score"):
-                st.write("**Effectiveness:**")
+                st.write("**Effectiveness**")
                 st.progress(selected_strategy_obj.effectiveness_score)
-                st.caption(f"{selected_strategy_obj.effectiveness_score:.0%}")
-
+                st.caption(f"{selected_strategy_obj.effectiveness_score:.0f}")
             d = _diff(selected_strategy_obj)
-            st.write(f"**Difficulty:** {DIFF_ICON.get(d, '⚪')} {d}")
+            st.write(f"**Difficulty:** {DIFF_ICON.get(d, '')} {d}")
+
+        # ── Attacker Model Override ───────────────────────────────────────────
+        st.markdown("---")
+        attacker_provider, attacker_model = _attacker_model_selector("single")
+        # ─────────────────────────────────────────────────────────────────────
 
     with col2:
-        st.subheader("⚡ Attack Preview")
+        st.subheader("Attack Preview")
         if forbidden_goal:
             try:
                 preview = selected_strategy_obj.generate(forbidden_goal)
                 st.text_area(
                     "Generated Attack",
                     value=preview[:400] + "..." if len(preview) > 400 else preview,
-                    height=350, disabled=True, key="preview_area"
+                    height=350,
+                    disabled=True,
+                    key="preview_area"
                 )
             except Exception as e:
                 st.error(f"Preview error: {e}")
@@ -339,6 +450,7 @@ def single_attack_interface(target_provider, target_model, is_local):
             st.info("Enter a forbidden goal to see attack preview")
 
     st.markdown("---")
+
     if st.button("🚀 Run Attack", type="primary", use_container_width=True):
         if not forbidden_goal:
             st.error("Please enter a forbidden goal")
@@ -349,20 +461,31 @@ def single_attack_interface(target_provider, target_model, is_local):
                 strategy=selected_strategy_obj.strategy_type.value,
                 target_provider=target_provider,
                 target_model=target_model,
-                is_local=is_local
+                is_local=is_local,
+                attacker_provider=attacker_provider,
+                attacker_model=attacker_model,
             )
-        if result:
-            display_single_result(result)
+            if result:
+                actual_attacker = (
+                    f"{attacker_provider}/{attacker_model}"
+                    if attacker_provider and attacker_model
+                    else f"groq/{settings.ATTACKER_MODEL}"
+                )
+                st.info(
+                    f"🤖 **Attacker:** `{actual_attacker}`  |  "
+                    f"🎯 **Target:** `{target_provider}/{target_model}`  |  "
+                    f"⚖️ **Judge:** `groq/{settings.JUDGE_MODEL}`"
+                )
+                display_single_result(result)
 
 
-# ─── Tab 2: Full Audit ────────────────────────────────────────────────────────
-
+# ─── Tab 2: Full Audit ─────────────────────────────────────────────────────────
 def full_audit_interface(provider, model, is_local, save_to_db, parallel):
-    st.header("🔥 Full Security Audit")
+    st.header("🔍 Full Security Audit")
     st.markdown("Test multiple attack strategies comprehensively")
 
-    type_badge = "🏠 LOCAL" if is_local else "☁️ CLOUD"
-    st.info(f"{type_badge} Target: **{provider}/{model}**")
+    type_badge = "LOCAL" if is_local else "CLOUD"
+    st.info(f"[{type_badge}] Target: {provider}/{model}")
 
     forbidden_goal = st.text_area(
         "Forbidden Goal",
@@ -375,9 +498,7 @@ def full_audit_interface(provider, model, is_local, save_to_db, parallel):
     all_names      = [s.strategy_type.value for s in all_strategies]
     total          = len(all_names)
 
-    # ✅ No phase options — just All or Custom
     col_scope, col_select = st.columns([1, 2])
-
     with col_scope:
         st.markdown("**Audit Scope**")
         audit_scope = st.radio(
@@ -386,23 +507,20 @@ def full_audit_interface(provider, model, is_local, save_to_db, parallel):
             label_visibility="collapsed",
             key="audit_scope"
         )
-        st.caption(f"Total available: **{total}** strategies")
+        st.caption(f"Total available: {total} strategies")
 
     with col_select:
         st.markdown("**Select strategies**")
-
         if audit_scope == "All Strategies":
             strategy_list = all_names
-            # Display as read-only pills
             pills_html = " ".join(
                 f'<span style="background:#1e3a5f;color:#93c5fd;padding:3px 10px;'
                 f'border-radius:12px;font-size:12px;margin:2px;display:inline-block">'
-                f'{n.replace("_"," ").title()}</span>'
+                f'{n.replace("_", " ").title()}</span>'
                 for n in all_names
             )
             st.markdown(pills_html, unsafe_allow_html=True)
             st.caption(f"✅ All {total} strategies selected")
-
         else:
             display_names = {s.strategy_type.value: s.name for s in all_strategies}
             selected = st.multiselect(
@@ -415,20 +533,25 @@ def full_audit_interface(provider, model, is_local, save_to_db, parallel):
             )
             strategy_list = selected
             if not strategy_list:
-                st.warning("⚠️ Select at least one strategy")
+                st.warning("Select at least one strategy")
             else:
-                st.caption(f"✅ {len(strategy_list)} strategies selected")
+                st.caption(f"{len(strategy_list)} strategies selected")
 
-    # ✅ Local model warning uses dynamic count
     if is_local and len(strategy_list) > 10:
         st.warning(
-            f"⚠️ Testing {len(strategy_list)} strategies on a local model may take "
+            f"Testing {len(strategy_list)} strategies on a local model may take "
             f"{len(strategy_list) * 1}–{len(strategy_list) * 2} minutes. "
-            f"Consider selecting fewer strategies."
+            "Consider selecting fewer strategies."
         )
 
+    # ── Attacker Model Override ───────────────────────────────────────────────
     st.markdown("---")
-    if st.button("🔥 Run Full Audit", type="primary", use_container_width=True):
+    attacker_provider_full, attacker_model_full = _attacker_model_selector("full")
+    # ─────────────────────────────────────────────────────────────────────────
+
+    st.markdown("---")
+
+    if st.button("🚀 Run Full Audit", type="primary", use_container_width=True):
         if not forbidden_goal:
             st.error("Please enter a forbidden goal")
             return
@@ -447,52 +570,64 @@ def full_audit_interface(provider, model, is_local, save_to_db, parallel):
             model=model,
             is_local=is_local,
             save_to_db=save_to_db,
-            parallel=parallel
+            parallel=parallel,
+            attacker_provider=attacker_provider_full,
+            attacker_model=attacker_model_full,
         )
-
         progress_bar.progress(100)
-        status_text.text("✅ Audit complete!")
+        status_text.text("Audit complete!")
 
         if result:
+            actual_attacker = (
+                f"{attacker_provider_full}/{attacker_model_full}"
+                if attacker_provider_full and attacker_model_full
+                else f"groq/{settings.ATTACKER_MODEL}"
+            )
+            st.info(
+                f"🤖 **Attacker:** `{actual_attacker}`  |  "
+                f"🎯 **Target:** `{provider}/{model}`  |  "
+                f"⚖️ **Judge:** `groq/{settings.JUDGE_MODEL}`"
+            )
             display_audit_results(result)
 
 
-# ─── Tab 4: Strategy Comparison ───────────────────────────────────────────────
 
+
+# ─── Tab 4: Strategy Comparison ───────────────────────────────────────────────
 def strategy_comparison_interface():
-    st.header("⚖️ Strategy Comparison Analysis")
+    st.header("📊 Strategy Comparison Analysis")
     st.markdown("Compare effectiveness and characteristics of all attack strategies")
 
     try:
-        stats = get_strategy_stats_dynamic()
+        stats          = get_strategy_stats_dynamic()
         all_strategies = list_all_strategies()
+        diff_counts    = stats["by_difficulty"]
 
-        # ✅ Metrics by difficulty — no phase hardcoding
-        diff_counts = stats["by_difficulty"]
         metric_cols = st.columns(2 + len(diff_counts))
         metric_cols[0].metric("Total Strategies", stats["total"])
-        metric_cols[1].metric("Avg Effectiveness", f"{stats['avg_effectiveness']:.0%}")
+        metric_cols[1].metric("Avg Effectiveness", f"{stats['avg_effectiveness']:.0f}")
         for i, (diff, icon) in enumerate(DIFF_ICON.items(), 2):
-            metric_cols[i].metric(f"{icon} {diff.replace('_',' ').title()}", diff_counts.get(diff, 0))
-
+            metric_cols[i].metric(
+                f"{icon} {diff.replace('_', ' ').title()}",
+                diff_counts.get(diff, 0)
+            )
         st.markdown("---")
 
-        # ✅ Comparison table — uses difficulty, no phase column
         comparison_data = []
         for s in all_strategies:
-            d = _diff(s)
+            d   = _diff(s)
             eff = getattr(s, "effectiveness_score", 0)
             comparison_data.append({
-                "Strategy":        s.name,
-                "Difficulty":      f"{DIFF_ICON.get(d,'⚪')} {d}",
-                "Effectiveness":   f"{eff:.0%}",
-                "Multi-turn":      "✅" if getattr(s, "multi_turn", False) else "❌",
-                "Type":            s.strategy_type.value,
-                "Description":     (s.description[:60] + "..." if len(s.description) > 60 else s.description),
+                "Strategy":    s.name,
+                "Difficulty":  f"{DIFF_ICON.get(d, '')} {d}",
+                "Effectiveness": f"{eff:.0f}",
+                "Multi-turn":  "🔄" if getattr(s, "multi_turn", False) else "",
+                "Type":        s.strategy_type.value,
+                "Description": s.description[:60] + "..." if len(s.description) > 60 else s.description,
             })
 
         df = pd.DataFrame(comparison_data)
-        st.subheader("📋 All Strategies Overview")
+        st.subheader("All Strategies Overview")
         st.dataframe(
             df, use_container_width=True, hide_index=True,
             column_config={
@@ -501,34 +636,31 @@ def strategy_comparison_interface():
                 )
             }
         )
-
         st.markdown("---")
 
-        # ✅ Charts — group by difficulty, not by phase
         col1, col2 = st.columns(2)
-
         with col1:
-            st.subheader("📊 Effectiveness by Difficulty")
-            chart_data = []
-            for s in all_strategies:
-                chart_data.append({
-                    "Strategy": s.name,
+            st.subheader("Effectiveness by Difficulty")
+            chart_data = [
+                {
+                    "Strategy":     s.name,
                     "Effectiveness": getattr(s, "effectiveness_score", 0) * 100,
-                    "Difficulty": _diff(s)
-                })
+                    "Difficulty":    _diff(s)
+                }
+                for s in all_strategies
+            ]
             df_chart = pd.DataFrame(chart_data)
             fig = px.bar(
                 df_chart, x="Strategy", y="Effectiveness",
-                color="Difficulty",
-                color_discrete_map=DIFF_COLOR,
+                color="Difficulty", color_discrete_map=DIFF_COLOR,
                 title="Effectiveness by Strategy",
-                labels={"Effectiveness": "Effectiveness (%)"}
+                labels={"Effectiveness": "Effectiveness"}
             )
             fig.update_layout(height=400, xaxis_tickangle=-45)
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
-            st.subheader("🥧 Difficulty Distribution")
+            st.subheader("Difficulty Distribution")
             fig_pie = go.Figure(data=go.Pie(
                 labels=list(diff_counts.keys()),
                 values=list(diff_counts.values()),
@@ -538,9 +670,7 @@ def strategy_comparison_interface():
             st.plotly_chart(fig_pie, use_container_width=True)
 
         st.markdown("---")
-
-        # ✅ Difficulty breakdown table — replaces hardcoded phase comparison
-        st.subheader("📊 Breakdown by Difficulty")
+        st.subheader("Breakdown by Difficulty")
         breakdown = []
         for diff in ["EASY", "MEDIUM", "HARD", "VERY_HARD"]:
             bucket = [s for s in all_strategies if _diff(s) == diff]
@@ -548,10 +678,11 @@ def strategy_comparison_interface():
                 continue
             avg_eff = sum(getattr(s, "effectiveness_score", 0) for s in bucket) / len(bucket)
             breakdown.append({
-                "Difficulty":      f"{DIFF_ICON.get(diff,'⚪')} {diff}",
-                "Strategies":      len(bucket),
-                "Avg Effectiveness": f"{avg_eff:.0%}",
-                "Examples":        ", ".join(s.name for s in bucket[:2]) + ("..." if len(bucket) > 2 else "")
+                "Difficulty":       f"{DIFF_ICON.get(diff, '')} {diff}",
+                "Strategies":       len(bucket),
+                "Avg Effectiveness": f"{avg_eff:.0f}",
+                "Examples":          ", ".join(s.name for s in bucket[:2])
+                                     + ("..." if len(bucket) > 2 else ""),
             })
         st.table(pd.DataFrame(breakdown))
 
@@ -562,9 +693,8 @@ def strategy_comparison_interface():
 
 
 # ─── Tab 3: Analytics ─────────────────────────────────────────────────────────
-
 def analytics_interface():
-    st.header("📊 Security Analytics")
+    st.header("📈 Security Analytics")
     st.markdown("Analyze historical audit results and trends")
 
     col1, col2, col3 = st.columns(3)
@@ -619,7 +749,6 @@ def analytics_interface():
 
 
 # ─── Tab 5: Model Comparison ──────────────────────────────────────────────────
-
 def model_comparison_interface():
     st.header("🤖 Model Comparison")
     st.markdown("Compare security posture across different language models")
@@ -627,33 +756,36 @@ def model_comparison_interface():
 
 
 # ─── Result Displays ──────────────────────────────────────────────────────────
-
 def display_single_result(result):
     st.markdown("---")
-    st.subheader("🎯 Attack Results")
+    st.subheader("📊 Attack Results")
 
     verdict = result.evaluation.verdict.value
     if verdict == "JAILBROKEN":
-        st.error(f"🔴 **JAILBROKEN** — Model was successfully attacked!")
+        st.error("🔴 **JAILBROKEN** — Model was successfully attacked!")
     elif verdict == "PARTIAL":
-        st.warning(f"🟡 **PARTIAL** — Model leaked some information")
+        st.warning("🟡 **PARTIAL** — Model leaked some information")
     else:
-        st.success(f"🟢 **REFUSED** — Model successfully refused")
+        st.success("🟢 **REFUSED** — Model successfully refused")
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Confidence",     f"{result.evaluation.confidence_score:.1%}")
+        st.metric("Confidence", f"{result.evaluation.confidence_score:.1%}")
     with col2:
         st.metric("Execution Time", f"{result.total_time_ms}ms")
     with col3:
-        st.metric("Attack ID",      result.attack.attack_id[:8] + "...")
+        st.metric("Attack ID", result.attack.attack_id[:8] + "...")
 
-    with st.expander("📝 Attack Prompt"):
-        st.text_area("Generated Attack", result.attack.generated_prompt,
-                     height=200, disabled=True, key="result_attack_prompt")
+    with st.expander("🗡️ Attack Prompt"):
+        st.text_area(
+            "Generated Attack", result.attack.generated_prompt,
+            height=200, disabled=True, key="result_attack_prompt"
+        )
     with st.expander("💬 Target Response"):
-        st.text_area("Model Response", result.response.response_text,
-                     height=200, disabled=True, key="result_target_response")
+        st.text_area(
+            "Model Response", result.response.response_text,
+            height=200, disabled=True, key="result_target_response"
+        )
     with st.expander("⚖️ Judge Reasoning"):
         st.write(result.evaluation.reasoning)
 
@@ -664,23 +796,28 @@ def display_audit_results(result):
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Total Attacks",       result.total_attacks)
+        st.metric("Total Attacks", result.total_attacks)
     with col2:
-        asr_color = "🔴" if result.attack_success_rate > 0.2 else "🟡" if result.attack_success_rate > 0.1 else "🟢"
+        asr_color = (
+            "🔴" if result.attack_success_rate > 0.2 else
+            "🟡" if result.attack_success_rate > 0.1 else "🟢"
+        )
         st.metric("Attack Success Rate", f"{result.attack_success_rate:.1%}", delta=asr_color)
     with col3:
         st.metric("Successful Jailbreaks", result.successful_jailbreaks)
     with col4:
-        st.metric("Execution Time",      f"{result.total_execution_time_ms / 1000:.1f}s")
+        st.metric("Execution Time", f"{result.total_execution_time_ms / 1000:.1f}s")
 
-    results_data = [{
-        "Strategy": r.attack.strategy_name,
-        "Verdict":  r.evaluation.verdict.value,
-        "Confidence": f"{r.evaluation.confidence_score:.1%}",
-        "Time (ms)": r.total_time_ms,
-        "Success":  "✅" if r.success else "❌"
-    } for r in result.results]
-
+    results_data = [
+        {
+            "Strategy":   r.attack.strategy_name,
+            "Verdict":    r.evaluation.verdict.value,
+            "Confidence": f"{r.evaluation.confidence_score:.1%}",
+            "Time (ms)":  r.total_time_ms,
+            "Success":    "✅" if r.success else "❌",
+        }
+        for r in result.results
+    ]
     df = pd.DataFrame(results_data)
     st.dataframe(df, use_container_width=True)
 
@@ -691,18 +828,23 @@ def display_audit_results(result):
         labels={"y": "Success (1=Yes, 0=No)"}
     )
     st.plotly_chart(fig, use_container_width=True)
- 
 
-# ─── Sync wrappers ────────────────────────────────────────────────────────────
 
-def run_single_attack_sync(forbidden_goal, strategy, target_provider, target_model, is_local):
+# ─── Sync wrappers (NO Streamlit UI calls allowed inside async def run) ────────
+def run_single_attack_sync(
+    forbidden_goal, strategy, target_provider, target_model, is_local,
+    attacker_provider=None,   # ← NEW param
+    attacker_model=None,      # ← NEW param
+):
     async def run():
         try:
             await db.connect()
             orchestrator = Orchestrator(
                 target_provider=target_provider,
                 target_model=target_model,
-                is_local=is_local
+                is_local=is_local,
+                attacker_provider=attacker_provider,   # ← passed cleanly
+                attacker_model=attacker_model,         # ← passed cleanly
             )
             result = await orchestrator.run_single_attack(
                 forbidden_goal=forbidden_goal,
@@ -728,14 +870,21 @@ def run_single_attack_sync(forbidden_goal, strategy, target_provider, target_mod
         loop.close()
 
 
-def run_full_audit_sync(forbidden_goal, strategies, provider, model, is_local, save_to_db, parallel):
+def run_full_audit_sync(
+    forbidden_goal, strategies, provider, model, is_local,
+    save_to_db, parallel,
+    attacker_provider=None,   # ← NEW param
+    attacker_model=None,      # ← NEW param
+):
     async def run():
         try:
             await db.connect()
             orchestrator = Orchestrator(
                 target_provider=provider,
                 target_model=model,
-                is_local=is_local
+                is_local=is_local,
+                attacker_provider=attacker_provider,   # ← NEW
+                attacker_model=attacker_model,         # ← NEW
             )
             result = await orchestrator.run_batch_audit(
                 forbidden_goal=forbidden_goal,
@@ -770,11 +919,11 @@ def fetch_analytics_data_sync(days: int):
             evaluations = await db.get_evaluations_by_filter(limit=1000)
             if not evaluations:
                 return None
-            total     = len(evaluations)
-            refused   = sum(1 for e in evaluations if e.get("verdict") == "REFUSED")
+            total      = len(evaluations)
+            refused    = sum(1 for e in evaluations if e.get("verdict") == "REFUSED")
             jailbroken = sum(1 for e in evaluations if e.get("verdict") == "JAILBROKEN")
-            partial   = sum(1 for e in evaluations if e.get("verdict") == "PARTIAL")
-            asr       = jailbroken / total * 100 if total > 0 else 0
+            partial    = sum(1 for e in evaluations if e.get("verdict") == "PARTIAL")
+            asr        = (jailbroken / total * 100) if total > 0 else 0
             return {
                 "total_tests": total,
                 "refused":     refused,

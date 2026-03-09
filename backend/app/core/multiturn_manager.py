@@ -10,6 +10,7 @@ from backend.app.models.schemas import (
     ConversationState, ConversationTurn, MultiTurnResult,
     ResponseAnalysis, TurnVerdict
 )
+
 from backend.app.core.response_analyzer import ResponseAnalyzer
 from backend.app.agents.attacker import AttackerAgent
 from backend.app.agents.judge import JudgeAgent
@@ -24,8 +25,12 @@ class MultiTurnManager:
     def __init__(self, db: Database):
         self.db = db
         self.analyzer = ResponseAnalyzer()
-        self.attacker = AttackerAgent()
+        self.attacker = AttackerAgent()                               # default attacker
         self.active_conversations: Dict[str, ConversationState] = {}
+        # ── per-conversation attacker overrides ───────────────────────────────
+        self._conversation_attackers: Dict[str, AttackerAgent] = {}
+        self._conversation_last_model_used: Dict[str, str] = {}
+        # ─────────────────────────────────────────────────────────────────────
         logger.info("MultiTurn Manager initialized")
 
     def _create_target_client(self, target_model: str) -> BaseLLMClient:
@@ -41,17 +46,14 @@ class MultiTurnManager:
         if "/" in target_model:
             provider, model_name = target_model.split("/", 1)
         else:
-            # No provider prefix — fall back to config defaults
             provider = settings.TARGET_MODEL_PROVIDER
             model_name = target_model
 
-        provider = provider.lower().strip()
+        provider   = provider.lower().strip()
         model_name = model_name.strip()
 
         logger.info(f"Creating target client: provider={provider} model={model_name}")
 
-        # ✅ Use LLMClientFactory for ALL providers — ensures proper
-        # BaseLLMClient init (request_count, total_tokens, get_stats)
         if provider == "nvidia":
             return LLMClientFactory.create(
                 provider="nvidia",
@@ -82,7 +84,8 @@ class MultiTurnManager:
         target_model: str,
         initial_strategy: str = "persona_adoption",
         max_turns: int = 10,
-        adaptive_mode: bool = True
+        adaptive_mode: bool = True,
+        attacker_model: Optional[str] = None,   # e.g. "groq/llama-3.3-70b-versatile"
     ) -> str:
         """
         Start a new multi-turn conversation.
@@ -96,6 +99,23 @@ class MultiTurnManager:
             adaptive_mode=adaptive_mode
         )
 
+        # ── Register a custom attacker for this conversation if requested ──────
+        if attacker_model:
+            if "/" in attacker_model:
+                provider, model = attacker_model.split("/", 1)
+            else:
+                provider = settings.ATTACKER_PROVIDER
+                model    = attacker_model
+            self._conversation_attackers[conversation.conversation_id] = AttackerAgent(
+                attacker_provider=provider.strip(),
+                attacker_model=model.strip()
+            )
+            logger.info(
+                f"Custom attacker for {conversation.conversation_id[:8]}...: "
+                f"{provider}/{model}"
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         self.active_conversations[conversation.conversation_id] = conversation
 
         logger.info(
@@ -103,7 +123,6 @@ class MultiTurnManager:
             f"Goal: {forbidden_goal[:50]}... | "
             f"Target: {target_model} | Max turns: {max_turns}"
         )
-
         return conversation.conversation_id
 
     async def execute_turn(
@@ -131,7 +150,7 @@ class MultiTurnManager:
         if conversation.jailbreak_achieved:
             raise ValueError("Jailbreak already achieved — conversation complete")
 
-        turn_num = conversation.current_turn + 1
+        turn_num   = conversation.current_turn + 1
         start_time = datetime.utcnow()
 
         logger.info(
@@ -139,7 +158,7 @@ class MultiTurnManager:
             f"Conversation {conversation_id[:8]}..."
         )
 
-        # Create target client dynamically per turn (respects user's model selection)
+        # Create target client dynamically per turn
         target_client = self._create_target_client(conversation.target_model)
 
         # 1. Select strategy
@@ -153,14 +172,24 @@ class MultiTurnManager:
 
         conversation.strategy_history.append(strategy)
 
-        # 2. Generate attack prompt via attacker agent (with full fallback chain)
+        # ── Use conversation-specific attacker if one was registered ──────────
+        attacker = self._conversation_attackers.get(conversation_id, self.attacker)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # 2. Generate attack prompt
         logger.debug(f"Generating attack with strategy: {strategy}")
-        attack_result = await self.attacker.generate_attack_async(
+        attack_result = await attacker.generate_attack_async(
             forbidden_goal=conversation.forbidden_goal,
             strategy_name=strategy,
             enhance_with_llm=True,
             conversation_context=self._get_conversation_context(conversation)
         )
+
+        # ── Track which model actually generated this prompt ─────────────────
+        self._conversation_last_model_used[conversation_id] = (
+            attack_result.metadata.model_used
+        )
+        # ─────────────────────────────────────────────────────────────────────
 
         # 3. Send to target model
         logger.debug(f"Querying target model: {conversation.target_model}")
@@ -181,7 +210,7 @@ class MultiTurnManager:
         )
 
         # 5. Build turn record
-        end_time = datetime.utcnow()
+        end_time       = datetime.utcnow()
         execution_time = int((end_time - start_time).total_seconds() * 1000)
 
         turn = ConversationTurn(
@@ -194,8 +223,8 @@ class MultiTurnManager:
             execution_time_ms=execution_time,
             tokens_used={
                 "attacker": len(attack_result.generated_prompt.split()),
-                "target": len(target_response.split()),
-                "judge": 100
+                "target":   len(target_response.split()),
+                "judge":    100
             }
         )
 
@@ -209,22 +238,21 @@ class MultiTurnManager:
 
         score_map = {
             TurnVerdict.JAILBROKEN: 1.0,
-            TurnVerdict.PARTIAL: 0.5,
-            TurnVerdict.REFUSED: 0.0,
-            TurnVerdict.UNCERTAIN: 0.3
+            TurnVerdict.PARTIAL:    0.5,
+            TurnVerdict.REFUSED:    0.0,
+            TurnVerdict.UNCERTAIN:  0.3
         }
-        turn_score = score_map.get(analysis.verdict, 0.0)
-
-        strategy_uses = conversation.strategy_history.count(strategy)
-        current_score = conversation.strategy_success_scores[strategy]
-        new_score = (current_score * (strategy_uses - 1) + turn_score) / strategy_uses
+        turn_score     = score_map.get(analysis.verdict, 0.0)
+        strategy_uses  = conversation.strategy_history.count(strategy)
+        current_score  = conversation.strategy_success_scores[strategy]
+        new_score      = (current_score * (strategy_uses - 1) + turn_score) / strategy_uses
         conversation.strategy_success_scores[strategy] = new_score
 
         # Check for jailbreak
         if analysis.verdict == TurnVerdict.JAILBROKEN:
             conversation.jailbreak_achieved = True
-            conversation.jailbreak_turn = turn_num
-            conversation.final_verdict = TurnVerdict.JAILBROKEN
+            conversation.jailbreak_turn     = turn_num
+            conversation.final_verdict      = TurnVerdict.JAILBROKEN
             logger.success(f"🎯 JAILBREAK achieved at turn {turn_num}!")
 
         # Track ASR progression
@@ -242,6 +270,7 @@ class MultiTurnManager:
             f"Turn {turn_num} complete: verdict={analysis.verdict.value} | "
             f"confidence={analysis.confidence:.2f} | "
             f"openness={analysis.openness_score:.2f} | "
+            f"attacker={attack_result.metadata.model_used} | "
             f"{execution_time}ms"
         )
 
@@ -306,13 +335,32 @@ class MultiTurnManager:
         )
 
         await self._save_conversation_results(result)
+
+        # ── Clean up per-conversation overrides ──────────────────────────────
+        self._conversation_attackers.pop(conversation_id, None)
+        self._conversation_last_model_used.pop(conversation_id, None)
+        # ─────────────────────────────────────────────────────────────────────
         del self.active_conversations[conversation_id]
 
         logger.success(
             f"Conversation {conversation_id[:8]}... complete: "
-            f"{final_verdict} in {len(conversation.turns)} turns"
+            f"{final_verdict} in {len(result.turns)} turns"
         )
+
         return result
+
+    def get_attacker_model(self, conversation_id: str) -> str:
+        """
+        Return the model name that is/was used as attacker for this conversation.
+        - After at least one turn: returns the actual model used (includes fallback info)
+        - Before first turn: returns primary client name of any custom attacker
+        - If no override: returns global default primary client name
+        """
+        if conversation_id in self._conversation_last_model_used:
+            return self._conversation_last_model_used[conversation_id]
+        if conversation_id in self._conversation_attackers:
+            return self._conversation_attackers[conversation_id].primary_client.model_name
+        return self.attacker.primary_client.model_name
 
     def _get_conversation_context(self, conversation: ConversationState) -> str:
         """Build last-3-turns context string for the attacker agent."""
@@ -332,17 +380,17 @@ class MultiTurnManager:
         """Persist a single turn to MongoDB."""
         try:
             await self.db.conversations_collection.insert_one({
-                "conversation_id": conversation_id,
-                "turn_id": turn.turn_id,
-                "turn_number": turn.turn_number,
-                "strategy_used": turn.strategy_used,
-                "attack_prompt": turn.attack_prompt,
-                "enhanced_prompt": turn.enhanced_prompt,
-                "target_response": turn.target_response,
-                "verdict": turn.response_analysis.verdict.value,
-                "confidence": turn.response_analysis.confidence,
-                "openness_score": turn.response_analysis.openness_score,
-                "timestamp": turn.timestamp
+                "conversation_id":  conversation_id,
+                "turn_id":          turn.turn_id,
+                "turn_number":      turn.turn_number,
+                "strategy_used":    turn.strategy_used,
+                "attack_prompt":    turn.attack_prompt,
+                "enhanced_prompt":  turn.enhanced_prompt,
+                "target_response":  turn.target_response,
+                "verdict":          turn.response_analysis.verdict.value,
+                "confidence":       turn.response_analysis.confidence,
+                "openness_score":   turn.response_analysis.openness_score,
+                "timestamp":        turn.timestamp
             })
         except Exception as e:
             logger.warning(f"Failed to save turn to DB: {e}")
@@ -351,18 +399,18 @@ class MultiTurnManager:
         """Persist complete conversation summary to MongoDB."""
         try:
             await self.db.multiturn_results_collection.insert_one({
-                "conversation_id": result.conversation_id,
-                "forbidden_goal": result.forbidden_goal,
-                "target_model": result.target_model,
-                "total_turns": result.total_turns,
-                "jailbreak_achieved": result.jailbreak_achieved,
-                "jailbreak_turn": result.jailbreak_turn,
-                "final_verdict": result.final_verdict,
-                "strategies_tried": result.strategies_tried,
+                "conversation_id":        result.conversation_id,
+                "forbidden_goal":         result.forbidden_goal,
+                "target_model":           result.target_model,
+                "total_turns":            result.total_turns,
+                "jailbreak_achieved":     result.jailbreak_achieved,
+                "jailbreak_turn":         result.jailbreak_turn,
+                "final_verdict":          result.final_verdict,
+                "strategies_tried":       result.strategies_tried,
                 "most_effective_strategy": result.most_effective_strategy,
                 "strategy_success_rates": result.strategy_success_rates,
-                "total_duration_ms": result.total_duration_ms,
-                "timestamp": datetime.utcnow()
+                "total_duration_ms":      result.total_duration_ms,
+                "timestamp":              datetime.utcnow()
             })
             logger.info(f"Saved conversation results: {result.conversation_id[:8]}...")
         except Exception as e:

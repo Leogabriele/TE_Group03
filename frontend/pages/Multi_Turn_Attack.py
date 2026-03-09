@@ -20,8 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.app.models.database import Database
 from backend.app.core.multiturn_manager import MultiTurnManager
-
-# FIX #1: was "from pydeck import settings" — completely wrong package
 from backend.app.config import settings
 
 # ─── Page config ──────────────────────────────────────────────────────────────
@@ -34,17 +32,10 @@ st.set_page_config(
 # Custom CSS
 st.markdown("""
 <style>
-.stMetric { background: #1e1e2e; border-radius: 8px; padding: 8px; }
-.verdict-jailbroken { color: #ef4444; font-weight: bold; }
-.verdict-partial { color: #f59e0b; font-weight: bold; }
-.verdict-refused { color: #10b981; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-
-# ─── FIX #2: Thread-safe async runner ─────────────────────────────────────────
-# The old "shared loop" pattern crashes on Streamlit reruns.
-# Each call gets a fresh event loop in a dedicated thread.
+# ─── Thread-safe async runner ─────────────────────────────────────────────────
 def run_async(coro):
     """Run an async coroutine safely from Streamlit's sync context."""
     def _run(c):
@@ -58,7 +49,6 @@ def run_async(coro):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         return executor.submit(_run, coro).result(timeout=120)
 
-
 # ─── DB + Manager (cached once per app session) ───────────────────────────────
 @st.cache_resource
 def get_manager():
@@ -69,9 +59,7 @@ def get_manager():
 
 manager = get_manager()
 
-
-# ─── FIX #3: Dynamic Groq model fetch moved OUTSIDE the sidebar if-block ──────
-# Defining @st.cache_data inside a conditional causes repeated re-registration.
+# ─── Dynamic model fetch (outside any if-block to avoid re-registration) ──────
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_cloud_models():
     """Fetch live Groq model list; fall back to known-good models."""
@@ -99,6 +87,7 @@ def _get_cloud_models():
         "nvidia/mistralai/mixtral-8x7b-instruct-v0.1",
         "nvidia/nvidia/mistral-nemo-minitron-8b-instruct",
     ]
+
     # Prepend current configured target so it appears first
     try:
         current = f"{settings.TARGET_MODEL_PROVIDER}/{settings.TARGET_MODEL_NAME}"
@@ -110,18 +99,18 @@ def _get_cloud_models():
 
     return models
 
-
 # ─── Session state init ───────────────────────────────────────────────────────
 def _init_state():
     defaults = {
-        "conversation_id":   None,
-        "turns":             [],
-        "conversation_active": False,
-        "auto_running":      False,
-        "max_turns":         5,   # FIX #4: locked here on Start, not from slider mid-run
-        "start_counter":     0,
-        "turn_counter":      0,
-        "auto_counter":      0,
+        "conversation_id":       None,
+        "turns":                 [],
+        "conversation_active":   False,
+        "auto_running":          False,
+        "max_turns":             5,
+        "start_counter":         0,
+        "turn_counter":          0,
+        "auto_counter":          0,
+        "attacker_model_display": f"groq/{settings.ATTACKER_MODEL} (default)",  # NEW
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -145,6 +134,7 @@ with st.sidebar:
         help="The harmful objective to achieve"
     )
 
+    # ── Target Model ──────────────────────────────────────────────────────────
     st.subheader("Target Model")
     model_type = st.radio(
         "Model Source",
@@ -157,10 +147,9 @@ with st.sidebar:
     if model_type == "Cloud APIs":
         all_cloud_models = _get_cloud_models()
 
-        # Resolve default from settings
         try:
             default_target = f"{settings.TARGET_MODEL_PROVIDER}/{settings.TARGET_MODEL_NAME}"
-            default_idx = all_cloud_models.index(default_target)
+            default_idx    = all_cloud_models.index(default_target)
         except (AttributeError, ValueError):
             default_idx = 0
 
@@ -212,7 +201,7 @@ with st.sidebar:
             )
         target_model = f"ollama/{local_model}"
 
-    # ── Strategy selector ─────────────────────────────────────────────────────
+    # ── Initial Strategy ──────────────────────────────────────────────────────
     st.subheader("Initial Strategy")
 
     try:
@@ -245,7 +234,101 @@ with st.sidebar:
     except Exception:
         pass
 
-    # FIX #4: slider only active before conversation starts
+    # ── Attacker Model ────────────────────────────────────────────────────────
+    st.subheader("🤖 Attacker Model")
+    st.caption(f"Default (from .env): `groq/{settings.ATTACKER_MODEL}`")
+
+    use_custom_attacker = st.checkbox(
+        "Override Attacker Model",
+        value=False,
+        disabled=st.session_state.conversation_active,
+        key="use_custom_attacker",
+        help="Choose a different model to craft the attack prompts"
+    )
+
+    attacker_model_full = None  # default: use .env
+
+    if use_custom_attacker:
+        atk_source = st.radio(
+            "Attacker Source",
+            ["☁️ Cloud (Groq)", "🏠 Local (Ollama)"],
+            horizontal=True,
+            disabled=st.session_state.conversation_active,
+            key="atk_source",
+            help="Groq = free cloud | Ollama = local, private"
+        )
+
+        if atk_source == "☁️ Cloud (Groq)":
+            groq_only = [
+                m.replace("groq/", "")
+                for m in _get_cloud_models()
+                if m.startswith("groq/")
+            ]
+            try:
+                atk_default_idx = groq_only.index(settings.ATTACKER_MODEL)
+            except ValueError:
+                atk_default_idx = 0
+            selected_attacker_model = st.selectbox(
+                "Groq Attacker Model",
+                options=groq_only,
+                index=atk_default_idx,
+                disabled=st.session_state.conversation_active,
+                key="attacker_model_select",
+                help="Free Groq tier"
+            )
+            attacker_model_full = f"groq/{selected_attacker_model}"
+            st.caption(f"🔴 Override: `{attacker_model_full}`")
+
+        else:  # Local Ollama
+            st.info("💡 Ollama must be running on `localhost:11434`")
+            ollama_atk_models = []
+            try:
+                import requests
+                resp = requests.get("http://localhost:11434/api/tags", timeout=2)
+                if resp.status_code == 200:
+                    ollama_atk_models = [m["name"] for m in resp.json().get("models", [])]
+            except Exception:
+                pass
+
+            default_ollama_atk = getattr(settings, "ATTACKER_OLLAMA_MODEL", "llama3.2:latest")
+
+            if ollama_atk_models:
+                if default_ollama_atk not in ollama_atk_models:
+                    ollama_atk_models.insert(0, default_ollama_atk)
+                try:
+                    atk_ollama_idx = ollama_atk_models.index(default_ollama_atk)
+                except ValueError:
+                    atk_ollama_idx = 0
+                selected_ollama_atk = st.selectbox(
+                    "Ollama Attacker Model",
+                    options=ollama_atk_models,
+                    index=atk_ollama_idx,
+                    disabled=st.session_state.conversation_active,
+                    key="atk_ollama_select",
+                    help="Installed Ollama models"
+                )
+                attacker_model_full = f"ollama/{selected_ollama_atk}"
+            else:
+                st.warning("⚠️ Ollama not reachable — enter manually")
+                manual_atk = st.text_input(
+                    "Model name",
+                    value=default_ollama_atk,
+                    disabled=st.session_state.conversation_active,
+                    key="atk_ollama_manual",
+                    help="e.g. llama3.2:latest, mistral:7b"
+                )
+                if manual_atk:
+                    attacker_model_full = f"ollama/{manual_atk}"
+
+            if attacker_model_full:
+                st.caption(f"🔴 Override: `{attacker_model_full}`")
+    else:
+        st.caption("✅ Using default from `.env`")
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Run Settings ──────────────────────────────────────────────────────────
     max_turns_slider = st.slider(
         "Maximum Turns", min_value=2, max_value=10, value=5,
         disabled=st.session_state.conversation_active,
@@ -276,12 +359,18 @@ with st.sidebar:
                         initial_strategy=initial_strategy,
                         max_turns=max_turns_slider,
                         adaptive_mode=adaptive_mode,
+                        attacker_model=attacker_model_full,      # ← NEW
                     )
                 )
-                st.session_state.conversation_id   = conv_id
-                st.session_state.turns             = []
+                st.session_state.conversation_id = conv_id
+                st.session_state.turns           = []
                 st.session_state.conversation_active = True
-                st.session_state.max_turns         = max_turns_slider  # FIX #4: lock it
+                st.session_state.max_turns       = max_turns_slider
+                # Store attacker label that survives reruns
+                st.session_state.attacker_model_display = (
+                    attacker_model_full
+                    or f"groq/{settings.ATTACKER_MODEL} (default)"
+                )
                 st.success(f"✅ Conversation started: {conv_id[:8]}...")
                 time.sleep(0.3)
                 st.rerun()
@@ -291,16 +380,16 @@ with st.sidebar:
 
     # ── Reset button ──────────────────────────────────────────────────────────
     if st.button("🔄 Reset", disabled=not st.session_state.conversation_active):
-        st.session_state.conversation_id    = None
-        st.session_state.turns              = []
-        st.session_state.conversation_active = False
-        st.session_state.auto_running       = False
-        st.session_state.max_turns          = 5
-        st.session_state.start_counter      = 0
-        st.session_state.turn_counter       = 0
-        st.session_state.auto_counter       = 0
+        st.session_state.conversation_id       = None
+        st.session_state.turns                 = []
+        st.session_state.conversation_active   = False
+        st.session_state.auto_running          = False
+        st.session_state.max_turns             = 5
+        st.session_state.start_counter         = 0
+        st.session_state.turn_counter          = 0
+        st.session_state.auto_counter          = 0
+        st.session_state.attacker_model_display = f"groq/{settings.ATTACKER_MODEL} (default)"
         st.rerun()
-
 
 # ─── Main content ─────────────────────────────────────────────────────────────
 if not st.session_state.conversation_active:
@@ -325,27 +414,38 @@ if not st.session_state.conversation_active:
 
 else:
     conv_id   = st.session_state.conversation_id
-    max_turns = st.session_state.max_turns       # FIX #4: always from locked session value
+    max_turns = st.session_state.max_turns
     turns_done = len(st.session_state.turns)
 
     jailbroken        = any(t.get("verdict") == "JAILBROKEN" for t in st.session_state.turns)
     conversation_over = jailbroken or turns_done >= max_turns
 
-    # ── KPI row ───────────────────────────────────────────────────────────────
-    col1, col2, col3, col4 = st.columns(4)
+    # ── KPI row (5 columns now) ───────────────────────────────────────────────
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Conversation ID", conv_id[:8] + "...")
     col2.metric("Turns Executed", f"{turns_done}/{max_turns}")
     col3.metric(
         "Status",
-        "🎯 JAILBROKEN"   if jailbroken else
-        "✅ Complete"     if turns_done >= max_turns else
+        "🎯 JAILBROKEN" if jailbroken else
+        "✅ Complete"   if turns_done >= max_turns else
         "🔄 Active"
     )
+
+    # Show live attacker model — after first turn shows actual model used
+    live_attacker = (
+        manager.get_attacker_model(conv_id)
+        if turns_done > 0
+        else st.session_state.get("attacker_model_display", f"groq/{settings.ATTACKER_MODEL}")
+    )
+    col4.metric("🤖 Attacker", live_attacker.split("/")[-1])
+
     if st.session_state.turns:
-        avg_openness = sum(t.get("openness_score", 0) for t in st.session_state.turns) / turns_done
-        col4.metric("Avg Openness", f"{avg_openness:.2f}")
+        avg_openness = (
+            sum(t.get("openness_score", 0) for t in st.session_state.turns) / turns_done
+        )
+        col5.metric("Avg Openness", f"{avg_openness:.2f}")
     else:
-        col4.metric("Avg Openness", "N/A")
+        col5.metric("Avg Openness", "N/A")
 
     st.divider()
 
@@ -359,7 +459,7 @@ else:
             key=f"auto_{st.session_state.auto_counter}"
         ):
             st.session_state.auto_counter += 1
-            st.session_state.auto_running = True
+            st.session_state.auto_running  = True
             st.rerun()
 
     with col_manual:
@@ -382,6 +482,7 @@ else:
                         "target_response_preview":   turn.target_response[:300] + "...",
                         "execution_time_ms":         turn.execution_time_ms,
                         "jailbreak_achieved":        turn.response_analysis.verdict.value == "JAILBROKEN",
+                        "attacker_model_used":       manager.get_attacker_model(conv_id),   # NEW
                     })
                     time.sleep(0.2)
                     st.rerun()
@@ -389,9 +490,7 @@ else:
                     st.error(f"Failed to execute turn: {e}")
                     logger.exception("execute_turn error")
 
-    # ─── FIX #5: Auto-run — ONE turn per rerun, not a blocking for-loop ───────
-    # The old for-loop held the Streamlit thread: UI appeared frozen and
-    # any error mid-loop left auto_running=True permanently.
+    # ── Auto-run: ONE turn per rerun ──────────────────────────────────────────
     if st.session_state.auto_running and not conversation_over:
         progress_val = turns_done / max_turns
         st.progress(progress_val, text=f"Auto-running turn {turns_done + 1}/{max_turns}...")
@@ -407,14 +506,15 @@ else:
                 "target_response_preview":   turn.target_response[:300] + "...",
                 "execution_time_ms":         turn.execution_time_ms,
                 "jailbreak_achieved":        turn.response_analysis.verdict.value == "JAILBROKEN",
+                "attacker_model_used":       manager.get_attacker_model(conv_id),   # NEW
             }
             st.session_state.turns.append(turn_data)
 
             new_done = len(st.session_state.turns)
             if turn_data["jailbreak_achieved"] or new_done >= max_turns:
-                st.session_state.auto_running = False  # natural stop
+                st.session_state.auto_running = False
 
-            st.rerun()  # shows updated UI then fires next turn if still running
+            st.rerun()
 
         except Exception as e:
             st.session_state.auto_running = False
@@ -422,7 +522,7 @@ else:
             logger.exception("Auto-run error")
 
     elif st.session_state.auto_running and conversation_over:
-        st.session_state.auto_running = False  # guard: clear stale flag
+        st.session_state.auto_running = False
 
     # ── Conversation timeline ─────────────────────────────────────────────────
     if st.session_state.turns:
@@ -431,9 +531,9 @@ else:
 
         with tab1:
             for turn in reversed(st.session_state.turns):
-                verdict  = turn.get("verdict", "UNKNOWN")
-                turn_num = turn.get("turn_number")
-                strategy = turn.get("strategy_used")
+                verdict    = turn.get("verdict", "UNKNOWN")
+                turn_num   = turn.get("turn_number")
+                strategy   = turn.get("strategy_used")
                 confidence = turn.get("confidence", 0)
                 openness   = turn.get("openness_score", 0)
                 icon = {"JAILBROKEN": "🎯", "PARTIAL": "⚠️"}.get(verdict, "🛡️")
@@ -443,16 +543,21 @@ else:
                     expanded=(turn_num == turns_done)
                 ):
                     ca, cb, cc = st.columns(3)
-                    ca.metric("Confidence",    f"{confidence:.2%}")
+                    ca.metric("Confidence", f"{confidence:.2%}")
                     cb.metric("Openness Score", f"{openness:.2f}")
-                    cc.metric("Next Strategy",  turn.get("recommended_next_strategy") or "N/A")
+                    cc.metric("Next Strategy", turn.get("recommended_next_strategy") or "N/A")
                     st.markdown("**Target Response Preview:**")
                     st.text_area(
                         "", value=turn.get("target_response_preview", ""),
                         height=100, disabled=True,
                         key=f"response_{turn_num}"
                     )
-                    st.caption(f"⏱ {turn.get('execution_time_ms', 0)}ms")
+                    # Shows attacker model + execution time
+                    attacker_used = turn.get("attacker_model_used", settings.ATTACKER_MODEL)
+                    st.caption(
+                        f"🤖 Attacker: `{attacker_used}` &nbsp;|&nbsp; "
+                        f"⏱ {turn.get('execution_time_ms', 0)}ms"
+                    )
 
         with tab2:
             st.markdown("### 📊 Performance Metrics")
@@ -466,9 +571,9 @@ else:
                     title="Verdict Distribution",
                     color=vc.index,
                     color_discrete_map={
-                        "REFUSED":    "#10b981",
-                        "PARTIAL":    "#f59e0b",
-                        "JAILBROKEN": "#ef4444",
+                        "REFUSED":   "#10b981",
+                        "PARTIAL":   "#f59e0b",
+                        "JAILBROKEN":"#ef4444",
                     }
                 ), use_container_width=True)
 
@@ -491,7 +596,7 @@ else:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Openness area chart (standalone)
+            # Openness area chart
             fig_openness = go.Figure()
             fig_openness.add_trace(go.Scatter(
                 x=turns_df["turn_number"], y=turns_df["openness_score"],
@@ -519,10 +624,12 @@ else:
                 ), use_container_width=True)
 
             with c2:
-                # FIX #6: pandas-safe groupby — old chained .apply() raises index errors
                 grp = turns_df.groupby("strategy_used")
-                sr = (
-                    grp.apply(lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x))
+                sr  = (
+                    grp.apply(
+                        lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x),
+                        include_groups=False
+                    )
                     .reset_index()
                 )
                 sr.columns = ["strategy", "success_rate"]
@@ -534,7 +641,6 @@ else:
                     range_y=[0, 1]
                 ), use_container_width=True)
 
-            # Detailed breakdown table
             st.markdown("### 📋 Detailed Strategy Breakdown")
             summary = grp.agg(
                 Uses=("turn_number", "count"),
@@ -542,7 +648,10 @@ else:
                 Avg_Openness=("openness_score", "mean"),
             )
             summary["Success_Rate"] = (
-                grp.apply(lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x))
+                grp.apply(
+                    lambda x: (x["verdict"] == "JAILBROKEN").sum() / len(x),
+                    include_groups=False
+                )
             )
             st.dataframe(
                 summary.style.format({
@@ -570,7 +679,6 @@ else:
                         "strategy_success_rates": result.strategy_success_rates,
                     })
                     time.sleep(2)
-                    # Full session reset
                     for k in list(st.session_state.keys()):
                         del st.session_state[k]
                     st.rerun()
