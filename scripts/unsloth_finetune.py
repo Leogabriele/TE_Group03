@@ -59,7 +59,82 @@ def load_jsonl_as_hf_dataset(path: str):
 
     dataset = load_dataset("json", data_files=str(tmp_jsonl))["train"]
     return dataset
+# ─── GGUF export ──────────────────────────────────────────────────────────────
 
+def save_gguf(model, tokenizer, output_dir: str, quantization: str = "q4_k_m") -> Path:
+    """
+    Merge LoRA weights and export a GGUF file via unsloth's built-in helper.
+    Returns the path to the produced .gguf file.
+    """
+    print(f"\n📦  Saving GGUF ({quantization}) to {output_dir} ...")
+    model.save_pretrained_gguf(
+        output_dir,
+        tokenizer,
+        quantization_method=quantization,
+    )
+
+    # Unsloth names the file  <stem>-unsloth-<quant>.gguf  or similar.
+    gguf_candidates = list(Path(output_dir).glob("*.gguf"))
+    if not gguf_candidates:
+        raise FileNotFoundError(
+            f"GGUF export claimed success but no .gguf file found in {output_dir}"
+        )
+    gguf_path = sorted(gguf_candidates)[-1]   # pick newest if multiple
+    print(f"✅  GGUF saved → {gguf_path}")
+    return gguf_path
+
+
+# ─── Ollama registration ──────────────────────────────────────────────────────
+
+def register_with_ollama(
+    gguf_path: Path,
+    ollama_model_name: str,
+    ollama_base_url: str = "http://localhost:11434",
+) -> dict:
+    """
+    Register the GGUF with a running Ollama instance via POST /api/create.
+    Ollama requires an *absolute* path in the Modelfile FROM directive.
+    """
+    gguf_abs = gguf_path.resolve()
+    modelfile_content = f"FROM {gguf_abs}\n"
+
+    print(f"\n🦙  Registering `{ollama_model_name}` with Ollama ...")
+    print(f"    Modelfile: FROM {gguf_abs}")
+
+    payload = {
+        "model": ollama_model_name,
+        "modelfile": modelfile_content,
+        "stream": False,
+    }
+
+    try:
+        resp = requests.post(
+            f"{ollama_base_url}/api/create",
+            json=payload,
+            timeout=300,
+        )
+    except requests.exceptions.ConnectionError:
+        msg = (
+            f"Could not reach Ollama at {ollama_base_url}. "
+            "Start Ollama and register manually with:\n"
+            f"    echo 'FROM {gguf_abs}' > Modelfile\n"
+            f"    ollama create {ollama_model_name} -f Modelfile"
+        )
+        print(f"⚠️  {msg}")
+        return {"registered": False, "error": "Ollama not reachable", "manual_cmd": msg}
+
+    if resp.status_code != 200:
+        print(f"❌  Ollama /api/create returned {resp.status_code}: {resp.text}")
+        return {"registered": False, "status_code": resp.status_code, "body": resp.text}
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+
+    print(f"✅  Ollama model `{ollama_model_name}` registered successfully.")
+    print(f"    Run it with:  ollama run {ollama_model_name}")
+    return {"registered": True, "model": ollama_model_name, "gguf_path": str(gguf_abs), "raw": data}
 
 def main():
     parser = argparse.ArgumentParser()
