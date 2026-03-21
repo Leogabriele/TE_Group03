@@ -1,38 +1,25 @@
 """
 Retraining dataset builder for Ollama safety fine-tuning.
-
-This module:
-- Extracts single-turn audit data (attacks, responses, evaluations)
-- Extracts multi-turn conversation turns
-- Mixes them with benign data to build a JSONL training set
-  with approximately:
-    * 50% benign examples      (from data/benign_data.csv)
-    * 30% refusal examples     (attack prompt + actual refusal/safe response)
-    * 10% jailbreak examples   (attack prompt + ideal refusal template)
-
-The JSONL format is compatible with typical instruction-tuning
-pipelines for Ollama-compatible models (`instruction` / `input` / `output`).
+Updated to support MongoDB audit_sessions.
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Tuple, Optional
 import asyncio
 import csv
 import json
 import random
-
+import re
+from typing import Any
 from loguru import logger
 import requests
 
 from backend.app.models.database import Database
 
-
 ExampleType = Literal["benign", "refusal", "jailbreak"]
-
 
 REFUSAL_TEMPLATE = (
     "I'm sorry, but I cannot help with that request. It appears to involve "
@@ -40,11 +27,9 @@ REFUSAL_TEMPLATE = (
     "must refuse and instead encourage safe and lawful behaviour."
 )
 
-
 @dataclass
 class TrainingExample:
     """Normalized training record used to build JSONL rows."""
-
     kind: ExampleType
     instruction: str
     user_input: str
@@ -61,18 +46,11 @@ class TrainingExample:
             ensure_ascii=False,
         )
 
+# ========================================================================
+# DATA LOADING HELPERS
+# ========================================================================
 
-def _load_benign_examples(
-    benign_path: Path,
-    max_examples: int | None = None,
-) -> List[TrainingExample]:
-    """
-    Load benign prompt/response pairs from CSV.
-
-    Expected columns (header row):
-    - Goal   (benign user query)
-    - Target (benign model response)
-    """
+def _load_benign_examples(benign_path: Path, max_examples: int | None = None) -> List[TrainingExample]:
     if not benign_path.exists():
         logger.warning(f"Benign dataset not found at {benign_path}")
         return []
@@ -84,470 +62,190 @@ def _load_benign_examples(
             for row in reader:
                 goal = (row.get("Goal") or "").strip()
                 target = (row.get("Target") or "").strip()
-                if not goal or not target:
-                    continue
-                examples.append(
-                    TrainingExample(
-                        kind="benign",
-                        instruction="Answer the user query helpfully and safely.",
-                        user_input=goal,
-                        output=target,
-                    )
-                )
+                if not goal or not target: continue
+                examples.append(TrainingExample(
+                    kind="benign",
+                    instruction="Answer the user query helpfully and safely.",
+                    user_input=goal,
+                    output=target
+                ))
     except Exception as e:
         logger.error(f"Failed to load benign data: {e}")
         return []
 
     random.shuffle(examples)
-    if max_examples is not None:
-        examples = examples[:max_examples]
-    logger.info(f"Loaded {len(examples)} benign examples from {benign_path}")
-    return examples
+    return examples[:max_examples] if max_examples else examples
 
-
-async def _collect_single_turn_examples(
-    database: Database,
-    max_docs: int = 5000,
-) -> Tuple[List[TrainingExample], List[TrainingExample]]:
-    """
-    Collect refusal / jailbreak examples from single-turn audits.
-
-    Returns:
-        (refusal_examples, jailbreak_examples)
-    """
-
-    eval_cursor = (
-        database.evaluations_collection.find(
-            {},
-            {
-                "evaluation_id": 1,
-                "response_id": 1,
-                "verdict": 1,
-                "timestamp": 1,
-            },
-        )
-        .sort("timestamp", -1)
-        .limit(max_docs)
+async def _process_audit_examples(raw_examples: List[Dict[str, Any]]) -> Tuple[List[TrainingExample], List[TrainingExample]]:
+    """Helper to convert raw DB examples into TrainingExample objects."""
+    refusal_examples = []
+    jailbreak_examples = []
+    
+    base_instruction = (
+        "You are a safe AI assistant. Answer user queries helpfully while "
+        "refusing any harmful, illegal, or unethical requests."
     )
-    evaluations = await eval_cursor.to_list(length=max_docs)
 
-    refusal_examples: List[TrainingExample] = []
-    jailbreak_examples: List[TrainingExample] = []
+    for ex in raw_examples:
+        prompt = (ex.get("generated_prompt") or ex.get("prompt") or "").strip()
+        response = (ex.get("response_text") or ex.get("response") or "").strip()
+        verdict = (ex.get("verdict") or "").upper()
 
-    for ev in evaluations:
-        verdict = ev.get("verdict")
-        response_id = ev.get("response_id")
-        if not response_id or verdict not in {"REFUSED", "JAILBROKEN", "PARTIAL"}:
-            continue
-
-        # Join through responses -> attacks to recover the attack prompt
-        response = await database.responses_collection.find_one({"response_id": response_id})
-        if not response:
-            continue
-        attack_id = response.get("attack_id")
-        if not attack_id:
-            continue
-
-        attack = await database.attacks_collection.find_one({"attack_id": attack_id})
-        if not attack:
-            continue
-
-        attack_prompt = (attack.get("generated_prompt") or "").strip()
-        model_response = (response.get("response_text") or "").strip()
-        if not attack_prompt:
-            continue
-
-        base_instruction = (
-            "You are a safe AI assistant. Answer user queries helpfully while "
-            "refusing any harmful, illegal, or unethical requests."
-        )
+        if not prompt: continue
 
         if verdict == "REFUSED":
-            if not model_response:
-                continue
-            refusal_examples.append(
-                TrainingExample(
-                    kind="refusal",
-                    instruction=base_instruction,
-                    user_input=attack_prompt,
-                    output=model_response,
-                )
-            )
-        else:  # JAILBROKEN or PARTIAL
-            jailbreak_examples.append(
-                TrainingExample(
-                    kind="jailbreak",
-                    instruction=base_instruction,
-                    user_input=attack_prompt,
-                    output=REFUSAL_TEMPLATE,
-                )
-            )
-
-    logger.info(
-        "Collected single-turn examples | refusals=%d jailbreak_like=%d",
-        len(refusal_examples),
-        len(jailbreak_examples),
-    )
+            refusal_examples.append(TrainingExample(
+                kind="refusal",
+                instruction=base_instruction,
+                user_input=prompt,
+                output=response if response else REFUSAL_TEMPLATE
+            ))
+        elif verdict in ("JAILBROKEN", "PARTIAL"):
+            jailbreak_examples.append(TrainingExample(
+                kind="jailbreak",
+                instruction=base_instruction,
+                user_input=prompt,
+                output=REFUSAL_TEMPLATE
+            ))
+            
     return refusal_examples, jailbreak_examples
 
-
-async def _collect_multiturn_examples(
-    database: Database,
-    max_turns: int = 5000,
-) -> Tuple[List[TrainingExample], List[TrainingExample]]:
-    """
-    Collect refusal / jailbreak examples from multi-turn conversations.
-
-    Each document in `conversations` corresponds to one turn and already
-    contains:
-    - attack_prompt
-    - target_response
-    - verdict
-    """
-
-    cursor = (
-        database.conversations_collection.find(
-            {},
-            {
-                "attack_prompt": 1,
-                "target_response": 1,
-                "verdict": 1,
-                "timestamp": 1,
-            },
-        )
-        .sort("timestamp", -1)
-        .limit(max_turns)
-    )
-    turns = await cursor.to_list(length=max_turns)
-
-    refusal_examples: List[TrainingExample] = []
-    jailbreak_examples: List[TrainingExample] = []
-
-    for t in turns:
-        verdict = t.get("verdict")
-        if verdict not in {"REFUSED", "JAILBROKEN", "PARTIAL"}:
-            continue
-
-        attack_prompt = (t.get("attack_prompt") or "").strip()
-        target_response = (t.get("target_response") or "").strip()
-        if not attack_prompt:
-            continue
-
-        base_instruction = (
-            "You are a safe AI assistant in a multi-turn conversation. "
-            "Continue the chat safely and refuse harmful requests."
-        )
-
-        if verdict == "REFUSED":
-            if not target_response:
-                continue
-            refusal_examples.append(
-                TrainingExample(
-                    kind="refusal",
-                    instruction=base_instruction,
-                    user_input=attack_prompt,
-                    output=target_response,
-                )
-            )
-        else:
-            jailbreak_examples.append(
-                TrainingExample(
-                    kind="jailbreak",
-                    instruction=base_instruction,
-                    user_input=attack_prompt,
-                    output=REFUSAL_TEMPLATE,
-                )
-            )
-
-    logger.info(
-        "Collected multi-turn examples | refusals=%d jailbreak_like=%d",
-        len(refusal_examples),
-        len(jailbreak_examples),
-    )
-    return refusal_examples, jailbreak_examples
-
-
-def _sample_with_ratios(
-    benign: List[TrainingExample],
-    refusals: List[TrainingExample],
-    jailbreaks: List[TrainingExample],
-    total_examples: int = 300,
-    benign_ratio: float = 0.5,
-    refusal_ratio: float = 0.3,
-    jailbreak_ratio: float = 0.1,
-) -> Tuple[List[TrainingExample], Dict[str, int]]:
-    """
-    Sample examples to approximately match the desired ratios.
-
-    If there is not enough data in one bucket, it will use as many as
-    available and re-balance the remaining capacity proportionally.
-    """
-    random.shuffle(benign)
-    random.shuffle(refusals)
-    random.shuffle(jailbreaks)
-
-    target_benign = int(total_examples * benign_ratio)
-    target_refusal = int(total_examples * refusal_ratio)
-    target_jb = int(total_examples * jailbreak_ratio)
-
-    # Initial capped selection
-    sel_benign = benign[: min(len(benign), target_benign)]
-    sel_refusal = refusals[: min(len(refusals), target_refusal)]
-    sel_jb = jailbreaks[: min(len(jailbreaks), target_jb)]
-
-    selected = sel_benign + sel_refusal + sel_jb
-    remaining_capacity = max(0, total_examples - len(selected))
-
-    if remaining_capacity > 0:
-        # Build a pool from whatever is left
-        leftover: List[TrainingExample] = []
-        if len(benign) > len(sel_benign):
-            leftover.extend(benign[len(sel_benign) :])
-        if len(refusals) > len(sel_refusal):
-            leftover.extend(refusals[len(sel_refusal) :])
-        if len(jailbreaks) > len(sel_jb):
-            leftover.extend(jailbreaks[len(sel_jb) :])
-
-        random.shuffle(leftover)
-        selected.extend(leftover[:remaining_capacity])
-
-    random.shuffle(selected)
-
-    counts = {
-        "benign": sum(1 for e in selected if e.kind == "benign"),
-        "refusal": sum(1 for e in selected if e.kind == "refusal"),
-        "jailbreak": sum(1 for e in selected if e.kind == "jailbreak"),
-    }
-    return selected, counts
-
+# ========================================================================
+# CORE COLLECTION LOGIC
+# ========================================================================
 
 async def build_retraining_dataset(
-    total_examples: int = 300,
-    benign_ratio: float = 0.5,
-    refusal_ratio: float = 0.3,
-    jailbreak_ratio: float = 0.1,
-    benign_filename: str = "data/benign_data.csv",
+    session_id: str | None = None,
+    benign_filename: str = "data/Benign_data/benign_data.csv",
     output_dir: str = "data",
-    *,
-    create_train_test_split: bool = False,
+    create_train_test_split: bool = True,
     test_ratio: float = 0.2,
 ) -> Dict[str, object]:
-    """
-    Build a mixed retraining dataset and persist it as JSONL.
-
-    Returns:
-        {
-            "path": <Path>,
-            "total": int,
-            "counts": {"benign": int, "refusal": int, "jailbreak": int}
-        }
-    """
-    base_path = Path(__file__).resolve().parents[3]  # project root
-    benign_path = base_path / benign_filename
-
-    benign_examples = _load_benign_examples(benign_path)
-
-    # Use an isolated Database instance so we don't interfere with the
-    # global client used by the main app (avoids "Cannot use MongoClient
-    # after close" when mixing event loops).
+    
     database = Database()
     await database.connect()
+    
+    audit_examples = []
     try:
-        # Single-turn + multi-turn
-        st_refusal, st_jb = await _collect_single_turn_examples(database)
-        mt_refusal, mt_jb = await _collect_multiturn_examples(database)
-
-        refusal_examples = st_refusal + mt_refusal
-        jailbreak_examples = st_jb + mt_jb
+        if session_id:
+            session = await database.load_audit_session(session_id)
+            if session:
+                audit_examples = session.get("examples", [])
+        
+        # 1. Process Audit Data (Refusals and Jailbreaks)
+        refusal_pool, jailbreak_pool = await _process_audit_examples(audit_examples)
+        total_adversarial = len(refusal_pool) + len(jailbreak_pool)
+        
+        # 2. Enforce 1:1 Ratio: Fetch exactly the same number of benign samples
+        base_path = Path(__file__).resolve().parents[3]
+        benign_path = base_path / benign_filename
+        benign_pool = _load_benign_examples(benign_path, max_examples=total_adversarial)
+        
+        # Final mix
+        selected = benign_pool + refusal_pool + jailbreak_pool
+        random.shuffle(selected)
+        
+        counts = {
+            "benign": len(benign_pool),
+            "refusal": len(refusal_pool),
+            "jailbreak": len(jailbreak_pool)
+        }
+        
     finally:
-        try:
-            await database.disconnect()
-        except Exception as e:
-            logger.warning(f"Failed to disconnect temporary database in retraining: {e}")
+        await database.disconnect()
 
-    selected, counts = _sample_with_ratios(
-        benign_examples, refusal_examples, jailbreak_examples, total_examples
-    )
 
+    # 4. Save to JSONL
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     out_dir = base_path / output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Always write the full mixed dataset
+    
     full_path = out_dir / f"retrain_dataset_{ts}.jsonl"
     with full_path.open("w", encoding="utf-8") as f:
         for ex in selected:
             f.write(ex.to_jsonl() + "\n")
 
-    logger.info(
-        "Retraining dataset written to %s | total=%d benign=%d refusal=%d jailbreak=%d",
-        full_path,
-        len(selected),
-        counts["benign"],
-        counts["refusal"],
-        counts["jailbreak"],
-    )
+    result = {"path": str(full_path), "total": len(selected), "counts": counts}
 
-    result: Dict[str, object] = {
-        "path": str(full_path),
-        "total": len(selected),
-        "counts": counts,
-    }
-
-    # Optional fast train/test split for model fine-tuning workflows
-    if create_train_test_split and len(selected) >= 10:
+    if create_train_test_split:
+        # Implementation of stratified split (simplified)
         random.shuffle(selected)
-        # Simple hold-out split
-        test_count = max(1, int(len(selected) * max(0.05, min(test_ratio, 0.5))))
-        test_examples = selected[:test_count]
-        train_examples = selected[test_count:]
-
-        train_path = out_dir / f"retrain_train_{ts}.jsonl"
-        test_path = out_dir / f"retrain_test_{ts}.jsonl"
-
-        with train_path.open("w", encoding="utf-8") as f_train:
-            for ex in train_examples:
-                f_train.write(ex.to_jsonl() + "\n")
-
-        with test_path.open("w", encoding="utf-8") as f_test:
-            for ex in test_examples:
-                f_test.write(ex.to_jsonl() + "\n")
-
-        logger.info(
-            "Train/test split created | train=%d test=%d | train=%s | test=%s",
-            len(train_examples),
-            len(test_examples),
-            train_path,
-            test_path,
-        )
-
-        result.update(
-            {
-                "train_path": str(train_path),
-                "test_path": str(test_path),
-                "train_size": len(train_examples),
-                "test_size": len(test_examples),
-            }
-        )
+        split_idx = int(len(selected) * (1 - test_ratio))
+        train_examples = selected[:split_idx]
+        test_examples = selected[split_idx:]
+        
+        train_path = out_dir / "train.jsonl"
+        test_path = out_dir / "test.jsonl"
+        
+        for path, data in [(train_path, train_examples), (test_path, test_examples)]:
+            with path.open("w", encoding="utf-8") as f:
+                for ex in data: f.write(ex.to_jsonl() + "\n")
+        
+        result.update({"train_path": str(train_path), "test_path": str(test_path)})
 
     return result
 
-
-def build_safety_system_prompt_from_train(
-    train_path: str,
-    max_examples: int = 50,
-) -> str:
-    """
-    Build a concise safety-oriented system prompt using a few training examples.
-
-    This is a lightweight, fast way to specialize an Ollama model using the
-    generated train split, without running heavy gradient-based fine-tuning.
-    """
-    examples: List[Dict[str, str]] = []
-    try:
-        with open(train_path, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if i >= max_examples:
-                    break
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                examples.append(obj)
-    except Exception as e:
-        logger.warning(f"Could not read train split for system prompt: {e}")
-        examples = []
-
-    harmful_goals: List[str] = []
-    refusal_phrases: List[str] = []
-
-    for ex in examples:
-        kind = ex.get("kind")
-        user_input = (ex.get("input") or "").strip()
-        output = (ex.get("output") or "").strip()
-        if not user_input or not output:
-            continue
-        if kind in {"refusal", "jailbreak"}:
-            harmful_goals.append(user_input[:120])
-            refusal_phrases.append(output[:160])
-
-    harmful_goals_snippet = "\n".join(
-        f"- {g}" for g in harmful_goals[:10]
-    ) or "- (examples omitted for brevity)"
-    refusal_snippet = "\n".join(
-        f"- {r}" for r in refusal_phrases[:10]
-    ) or "- Politely refuse and explain why the request is unsafe or not allowed."
-
-    system_prompt = f"""
-You are a safety-aligned assistant being used to harden another model
-against jailbreaking attacks. Always follow these rules:
-
-1. **Refuse harmful requests** clearly and consistently.
-2. Never give step-by-step instructions for anything illegal, violent, or unethical.
-3. Prefer safe, high-level education and harm-reduction guidance instead of operational details.
-
-The following are examples of *harmful or suspicious goals* seen during audits:
-{harmful_goals_snippet}
-
-When you detect similar goals, respond with firm but polite refusals, similar in spirit to:
-{refusal_snippet}
-
-If a request is clearly benign, you may answer helpfully, but still avoid adding any unsafe detail.
-""".strip()
-
-    return system_prompt
-
-
-def create_ollama_child_model_from_train(
-    base_model: str,
-    new_model: str,
-    train_path: str,
-    ollama_base_url: str = "http://localhost:11434",
-) -> Dict[str, object]:
-    """
-    Create a new Ollama model derived from `base_model` using a safety-focused
-    system prompt distilled from the training split.
-
-    This uses Ollama's /api/create endpoint, so it is much faster than full
-    gradient-based fine-tuning while still being data-driven.
-    """
-    system_prompt = build_safety_system_prompt_from_train(train_path)
-
-    payload = {
-        "model": new_model,
-        "from": base_model,
-        "system": system_prompt,
-        "stream": False,
+def _sample_with_ratios(benign, refusals, jailbreaks, total, b_r, r_r, j_r):
+    # Standard sampling logic...
+    target_b, target_r, target_j = int(total*b_r), int(total*r_r), int(total*j_r)
+    
+    sel_b = random.sample(benign, min(len(benign), target_b))
+    sel_r = random.sample(refusals, min(len(refusals), target_r))
+    sel_j = random.sample(jailbreaks, min(len(jailbreaks), target_j))
+    
+    combined = sel_b + sel_r + sel_j
+    random.shuffle(combined)
+    
+    return combined, {
+        "benign": len(sel_b),
+        "refusal": len(sel_r),
+        "jailbreak": len(sel_j)
     }
+def build_retraining_dataset_sync(
+    session_id: str | None = None,
+    create_train_test_split: bool = False,
+    test_ratio: float = 0.2,
+) -> dict:
+        """
+        Synchronous wrapper for the async build_retraining_dataset function.
+        Streamlit handles async poorly in some versions, so this ensures stability.
+        """
+        async def _run():
+            return await build_retraining_dataset(
+                session_id=session_id,
+                create_train_test_split=create_train_test_split,
+                test_ratio=test_ratio,
+            )
 
-    try:
-        resp = requests.post(f"{ollama_base_url}/api/create", json=payload, timeout=300)
-    except Exception as e:
-        logger.error(f"Failed to contact Ollama /api/create: {e}")
-        raise
+        try:
+            # Create a new event loop for this specific run
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
 
-    if resp.status_code != 200:
-        logger.error(f"Ollama create failed [{resp.status_code}]: {resp.text}")
-        raise RuntimeError(f"Ollama create failed with status {resp.status_code}")
 
-    try:
-        data = resp.json()
-    except Exception:
-        data = {}
+def sanitize_ollama_model_name(name: str) -> str:
+    clean = name.lower()
+    clean = re.sub(r"[^a-z0-9_-]+", "-", clean)
+    clean = re.sub(r"-+", "-", clean).strip("-")
+    return clean or "model-safe"
 
-    logger.info("Created derived Ollama model '%s' from '%s'", new_model, base_model)
-    return {
-        "model": new_model,
-        "base_model": base_model,
-        "train_path": train_path,
-        "raw_response": data,
-    }
 
 def register_gguf_with_ollama(
     gguf_path: str,
     ollama_model_name: str,
     ollama_base_url: str = "http://localhost:11434",
 ) -> Dict[str, object]:
+    sanitized_name = sanitize_ollama_model_name(ollama_model_name)
+    if sanitized_name != ollama_model_name:
+        logger.warning(
+            "Ollama model name '%s' is invalid, using sanitized '%s'",
+            ollama_model_name,
+            sanitized_name,
+        )
+    ollama_model_name = sanitized_name
     """
     Register an already-exported GGUF file as a new Ollama model.
 
@@ -558,10 +256,12 @@ def register_gguf_with_ollama(
     if not gguf_abs.exists():
         raise FileNotFoundError(f"GGUF file not found: {gguf_abs}")
 
+    # Ollama expects either 'from' or 'files'.
     modelfile_content = f"FROM {gguf_abs}\n"
     payload = {
         "model": ollama_model_name,
-        "modelfile": modelfile_content,
+        "from": str(gguf_abs),
+        "modelfile": modelfile_content,  # fallback for older APIs
         "stream": False,
     }
 
@@ -632,6 +332,21 @@ def get_model_save_status(output_dir: str) -> Dict[str, object]:
 
     # GGUF
     gguf_files = sorted(out.glob("*.gguf"))
+    if not gguf_files:
+        # fallback for unsloth output directory naming behaviour (e.g., output_dir + '_gguf')
+        alt_out = Path(str(out) + "_gguf")
+        if alt_out.exists():
+            gguf_files = sorted(alt_out.glob("*.gguf"))
+            if gguf_files:
+                # move into expected output directory for consistency
+                out.mkdir(parents=True, exist_ok=True)
+                moved_files = []
+                for alt_file in gguf_files:
+                    dest = out / alt_file.name
+                    alt_file.replace(dest)
+                    moved_files.append(dest)
+                gguf_files = sorted(moved_files)
+
     if gguf_files:
         status["has_gguf"] = True
         status["gguf_path"] = str(gguf_files[-1].resolve())
@@ -647,40 +362,3 @@ def get_model_save_status(output_dir: str) -> Dict[str, object]:
             pass
 
     return status
-def build_retraining_dataset_sync(
-    total_examples: int = 300,
-    benign_ratio: float = 0.5,
-    refusal_ratio: float = 0.3,
-    jailbreak_ratio: float = 0.1,
-    create_train_test_split: bool = False,
-    test_ratio: float = 0.2,
-) -> Dict[str, object]:
-    """
-    Synchronous helper for Streamlit pages.
-
-    Uses asyncio.run so we don't manually manage event loops,
-    which can conflict with Streamlit's own lifecycle.
-    """
-
-    async def _run():
-        return await build_retraining_dataset(
-            total_examples=total_examples,
-            benign_ratio=benign_ratio,
-            refusal_ratio=refusal_ratio,
-            jailbreak_ratio=jailbreak_ratio,
-            create_train_test_split=create_train_test_split,
-            test_ratio=test_ratio,
-        )
-
-    # If an event loop is already running (very rare in Streamlit),
-    # fall back to creating a task on that loop.
-    try:
-        return asyncio.run(_run())
-    except RuntimeError as e:
-        # "asyncio.run() cannot be called from a running event loop"
-        if "running event loop" not in str(e):
-            raise
-        loop = asyncio.get_event_loop()
-        return loop.create_task(_run())
-
-

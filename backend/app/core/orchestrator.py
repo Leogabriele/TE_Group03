@@ -9,7 +9,7 @@ from loguru import logger
 
 from backend.app.agents.attacker import AttackerAgent
 from backend.app.agents.judge import JudgeAgent
-from backend.app.core.llm_clients import BaseLLMClient, LLMClientFactory
+from backend.app.core.llm_clients import BaseLLMClient, LLMClientFactory , UnslothClient
 from backend.app.models.database import db
 from backend.app.models.schemas import (
     AuditResult,
@@ -18,9 +18,10 @@ from backend.app.models.schemas import (
     TargetModelResponse,
     JudgeVerdict
 )
+
 from backend.app.models.enums import VerdictType, LLMProvider
 from backend.app.config import settings
-
+from datetime import datetime
 from backend.app.core.conversation import (
     MultiTurnAttackManager,
     ConversationState,
@@ -40,7 +41,9 @@ class Orchestrator:
         self,
         target_provider: Optional[str] = None,
         target_model: Optional[str] = None,
-        is_local: bool = False  # NEW PARAMETER
+        model_object: Optional[Any] = None,  # NEW PARAMETER for direct model objects
+        tokenizer:Optional[Any] = None,  # NEW PARAMETER for custom tokenizers
+        is_local: bool = False  # NEW PARAMETER,
     ):
         """
         Initialize orchestrator
@@ -48,6 +51,8 @@ class Orchestrator:
         Args:
             target_provider: Target model provider (groq/nvidia/ollama)
             target_model: Target model name
+            model_object: Direct model object (for unsloth)
+            tokenizer: Custom tokenizer (for unsloth)
             is_local: Whether target is a local model
         """
         self.attacker = AttackerAgent()
@@ -56,18 +61,31 @@ class Orchestrator:
         # Setup target model
         self.target_provider = target_provider or settings.TARGET_MODEL_PROVIDER
         self.target_model = target_model or settings.TARGET_MODEL_NAME
+        self.model_object = model_object
+        self.tokenizer = tokenizer
         self.is_local = is_local
         
         # Create target client (local or cloud)
-        if is_local:
-            logger.info(f"🏠 Using LOCAL target: {self.target_provider}/{self.target_model}")
+        if self.target_provider == "unsloth":
+            logger.info("🛡️ Using DIRECT UNSLOTH target (In-Memory Patch)")
+
+            self.target_client = UnslothClient(
+                model=self.model_object,
+                tokenizer=self.tokenizer
+            )
+
+        elif self.target_provider == "ollama":
+            logger.info(f"🏠 Using LOCAL Ollama: {self.target_model}")
+
             self.target_client = LLMClientFactory.create(
-                provider=self.target_provider,
+                provider="ollama",
                 model_name=self.target_model,
                 is_local=True
             )
+
         else:
             logger.info(f"☁️ Using CLOUD target: {self.target_provider}/{self.target_model}")
+
             self.target_client = LLMClientFactory.create(
                 provider=self.target_provider,
                 model_name=self.target_model,
@@ -344,7 +362,26 @@ class Orchestrator:
                         audit_results.append(result)
                     except Exception as e:
                         logger.error(f"Failed strategy {strategy}: {e}")
-            
+            # --- NEW: COMPULSORY SESSION PERSISTENCE ---
+            if save_to_db and audit_results:
+                # Format data for the retraining-focused audit_sessions collection
+                session_examples = []
+                for r in audit_results:
+                    session_examples.append({
+                        "generated_prompt": r.attack.generated_prompt,
+                        "response_text": r.response.response_text,
+                        "verdict": r.evaluation.verdict.value,
+                        "strategy": r.attack.strategy_name,
+                        "timestamp": datetime.utcnow()
+                    })
+                
+                # Save to the new collection we created in database.py
+                session_id = await db.save_audit_session(
+                    examples=session_examples,
+                    model=self.target_model,
+                    forbidden_goal=forbidden_goal
+                )
+                logger.info(f"📁 Audit session persisted for retraining: {session_id}")
             # Calculate metrics
             total_attacks = len(audit_results)
             successful_jailbreaks = sum(
@@ -459,7 +496,7 @@ class Orchestrator:
     def get_statistics(self) -> Dict[str, Any]:
         """Get orchestrator statistics"""
         return {
-            "target_model": f"{self.target_provider}/{self.target_model}",
+            "target_model": f"{self.target_provider}/{self.target_model}" if self.target_model else f"{self.target_provider}",
             "attacker_model": self.attacker.llm_client.model_name,
             "judge_model": self.judge.llm_client.model_name,
             "attacker_stats": self.attacker.llm_client.get_stats(),

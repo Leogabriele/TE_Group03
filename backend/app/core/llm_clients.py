@@ -279,6 +279,13 @@ class LocalLLMClient(BaseLLMClient):
 
 class LLMClientFactory:
     """Factory for creating LLM clients"""
+
+    @staticmethod
+    def _resolve_api_key(provider: str, api_key: Optional[str] = None) -> Optional[str]:
+        """Resolve the correct API key for a cloud provider."""
+        if api_key:
+            return api_key
+        return settings.get_api_key_for_provider(provider)
     
     @staticmethod
     def create(
@@ -294,11 +301,11 @@ class LLMClientFactory:
         
         # Cloud providers
         if provider.lower() == "groq":
-            api_key = api_key or settings.GROQ_API_KEY
+            api_key = LLMClientFactory._resolve_api_key("groq", api_key)
             return GroqClient(api_key=api_key, model_name=model_name)
         
         elif provider.lower() == "nvidia":
-            api_key = api_key or settings.NVIDIA_API_KEY
+            api_key = LLMClientFactory._resolve_api_key("nvidia", api_key)
             return NVIDIAClient(api_key=api_key, model_name=model_name)
         
         else:
@@ -307,17 +314,19 @@ class LLMClientFactory:
     @staticmethod
     def create_attacker() -> BaseLLMClient:
         """Create attacker LLM client"""
-        return GroqClient(
-            api_key=settings.GROQ_API_KEY,
-            model_name=settings.ATTACKER_MODEL
+        return LLMClientFactory.create(
+            provider=settings.ATTACKER_PROVIDER,
+            model_name=settings.ATTACKER_MODEL,
+            api_key=settings.get_api_key_for_provider(settings.ATTACKER_PROVIDER)
         )
     
     @staticmethod
     def create_judge() -> BaseLLMClient:
         """Create judge LLM client"""
-        return GroqClient(
-            api_key=settings.GROQ_API_KEY,
-            model_name=settings.JUDGE_MODEL
+        return LLMClientFactory.create(
+            provider=settings.JUDGE_PROVIDER,
+            model_name=settings.JUDGE_MODEL,
+            api_key=settings.get_api_key_for_provider(settings.JUDGE_PROVIDER)
         )
     
     @staticmethod
@@ -328,3 +337,57 @@ class LLMClientFactory:
             model_name=settings.TARGET_MODEL_NAME,
             is_local=is_local
         )
+
+
+class UnslothClient(BaseLLMClient):
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_name = "unsloth-local"
+        self._request_count = 0
+
+    def generate(self, prompt: str, temperature=0.7, max_tokens=200,**kwargs) -> str:
+        self._request_count += 1
+
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            do_sample=True if temperature > 0 else False,
+            pad_token_id=self.tokenizer.eos_token_id
+        )
+
+        prompt_length = inputs.input_ids.shape[1]
+        response_text = self.tokenizer.decode(outputs[0][prompt_length:], skip_special_tokens=True)
+        
+        return response_text.strip()
+
+    async def generate_async(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ) -> str:
+        """Generate text asynchronously using thread pool executor"""
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.generate(prompt, temperature, max_tokens)
+            )
+            return response
+        except Exception as e:
+            logger.error(f"❌ Unsloth  error (async): {e}")
+            raise
+
+    def get_stats(self):
+        return {
+            "provider": "unsloth",
+            "model": self.model_name,
+            "requests": self._request_count
+        }
+    

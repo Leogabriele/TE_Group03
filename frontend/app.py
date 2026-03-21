@@ -31,7 +31,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
+if "app_initialized" not in st.session_state:
+    st.session_state.active_audit_session_id = None
+    st.session_state.app_initialized = True
 st.markdown("""
 <style>
 .main-header { font-size: 3rem; font-weight: bold; text-align: center; color: #1f77b4; margin-bottom: 2rem; }
@@ -226,6 +228,28 @@ def main():
 
 
 # ─── Tab 1: Single Attack ──────────────────────────────────────────────────────
+def save_or_update_single_attack_session(result, model, goal, existing_session_id):
+    """Bridge for Single Attack tab to persist data into the active session index"""
+    async def _run():
+        try:
+            await db.connect()
+            example = {
+                "generated_prompt": result.attack.generated_prompt,
+                "response_text": result.response.response_text,
+                "verdict": result.evaluation.verdict.value,
+                "strategy": result.attack.strategy_name,
+                "timestamp": datetime.utcnow()
+            }
+            # update_or_create_session should be implemented in database.py
+            return await db.update_or_create_session(
+                example=example,
+                model=model,
+                forbidden_goal=goal,
+                session_id=existing_session_id
+            )
+        finally:
+            await db.disconnect()
+    return asyncio.run(_run())
 
 def single_attack_interface(target_provider, target_model, is_local):
     st.header("🎯 Single Attack Test")
@@ -339,6 +363,8 @@ def single_attack_interface(target_provider, target_model, is_local):
             st.info("Enter a forbidden goal to see attack preview")
 
     st.markdown("---")
+    if "single_session_id" not in st.session_state:
+        st.session_state.single_session_id = None
     if st.button("🚀 Run Attack", type="primary", use_container_width=True):
         if not forbidden_goal:
             st.error("Please enter a forbidden goal")
@@ -352,6 +378,11 @@ def single_attack_interface(target_provider, target_model, is_local):
                 is_local=is_local
             )
         if result:
+            new_id = save_or_update_single_attack_session(
+                    result, target_model, forbidden_goal, st.session_state.active_audit_session_id
+                )
+            st.session_state.active_audit_session_id = new_id
+            st.success(f"Attack added to Session: `{new_id}`")
             display_single_result(result)
 
 
@@ -440,22 +471,60 @@ def full_audit_interface(provider, model, is_local, save_to_db, parallel):
         status_text  = st.empty()
         status_text.text(f"Running audit with {len(strategy_list)} strategies...")
 
-        result = run_full_audit_sync(
-            forbidden_goal=forbidden_goal,
-            strategies=strategy_list,
-            provider=provider,
-            model=model,
-            is_local=is_local,
-            save_to_db=save_to_db,
-            parallel=parallel
-        )
+        result, session_id = run_full_audit_and_persist_sync(
+                forbidden_goal=forbidden_goal,
+                strategies=strategy_list,
+                provider=provider,
+                model=model,
+                is_local=is_local,
+                parallel=parallel,
+                existing_id=st.session_state.active_audit_session_id if save_to_db else None
+            )
 
         progress_bar.progress(100)
         status_text.text("✅ Audit complete!")
 
-        if result:
+        if result and session_id:
+            st.session_state.active_audit_session_id = session_id
             display_audit_results(result)
+            st.success(f"✅ Audit Session Persisted: `{session_id}`")
+            
 
+            
+            st.markdown("---")
+
+def run_full_audit_and_persist_sync(forbidden_goal, strategies, provider, model, is_local, parallel, existing_id):
+    """Bridge for Full Audit tab to run and compulsorily save batch results"""
+    async def _run():
+
+            await db.connect()
+            orchestrator = Orchestrator(target_provider=provider, target_model=model, is_local=is_local)
+            audit_result = await orchestrator.run_batch_audit(
+                forbidden_goal=forbidden_goal, 
+                strategy_names=strategies, 
+                save_to_db=True, 
+                parallel=parallel
+            )
+
+            new_examples = []
+            for r in audit_result.results:
+                new_examples.append({
+                    "generated_prompt": r.attack.generated_prompt,
+                    "response_text": r.response.response_text,
+                    "verdict": r.evaluation.verdict.value,
+                    "strategy": r.attack.strategy_name,
+                    "timestamp": datetime.utcnow()
+                })
+            
+            # update_or_create_batch_session should be implemented in database.py
+            session_id = await db.update_or_create_batch_session(
+                examples=new_examples,
+                model=model,
+                forbidden_goal=forbidden_goal,
+                session_id=existing_id
+            )
+            return audit_result, session_id
+    return asyncio.run(_run())
 
 # ─── Tab 4: Strategy Comparison ───────────────────────────────────────────────
 
@@ -684,13 +753,16 @@ def display_audit_results(result):
     df = pd.DataFrame(results_data)
     st.dataframe(df, use_container_width=True)
 
-    fig = px.bar(
+    if result.successful_jailbreaks > 0:
+        fig = px.bar(
         df, x="Strategy",
         y=[1 if s == "✅" else 0 for s in df["Success"]],
         title="Attack Success by Strategy",
         labels={"y": "Success (1=Yes, 0=No)"}
     )
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No successful attacks to display in chart.")
  
 
 # ─── Sync wrappers ────────────────────────────────────────────────────────────

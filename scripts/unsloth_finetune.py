@@ -23,7 +23,8 @@ from datasets import load_dataset
 from unsloth import FastLanguageModel
 from transformers import TrainingArguments
 from trl import SFTTrainer
-
+import torch
+import os
 
 def load_jsonl_as_hf_dataset(path: str):
     """
@@ -62,25 +63,53 @@ def load_jsonl_as_hf_dataset(path: str):
 # ─── GGUF export ──────────────────────────────────────────────────────────────
 
 def save_gguf(model, tokenizer, output_dir: str, quantization: str = "q4_k_m") -> Path:
-    """
-    Merge LoRA weights and export a GGUF file via unsloth's built-in helper.
-    Returns the path to the produced .gguf file.
-    """
-    print(f"\n📦  Saving GGUF ({quantization}) to {output_dir} ...")
+    print(f"Saving GGUF ({quantization}) to {output_dir} ...")
+
+    # ✅ Verify llama.cpp exists before attempting export
+    llama_cpp_dir = Path(os.environ.get("LLAMA_CPP_PATH", r"C:\llama.cpp"))
+    
+    # Look for convert script or binary
+    convert_script = llama_cpp_dir / "convert_hf_to_gguf.py"
+    quantize_bin   = llama_cpp_dir / "llama-quantize.exe"
+    
+    if not llama_cpp_dir.exists():
+        raise FileNotFoundError(
+            f"llama.cpp not found at {llama_cpp_dir}\n"
+            f"Download pre-built binary from:\n"
+            f"https://github.com/ggerganov/llama.cpp/releases/latest\n"
+            f"Extract to: {llama_cpp_dir}"
+        )
+    
+    if not convert_script.exists():
+        raise FileNotFoundError(
+            f"convert_hf_to_gguf.py not found in {llama_cpp_dir}\n"
+            f"Make sure you downloaded the full release zip, not just the binary."
+        )
+
+    print(f"Found llama.cpp at: {llama_cpp_dir}")
+
+    # ✅ Read base model from metadata
+    meta_path = Path(output_dir) / "training_meta.json"
+    base_model = None
+    if meta_path.exists():
+        import json
+        meta = json.loads(meta_path.read_text())
+        base_model = meta.get("base_model")
+
     model.save_pretrained_gguf(
         output_dir,
         tokenizer,
         quantization_method=quantization,
+        **({"base_model": base_model} if base_model else {})
     )
 
-    # Unsloth names the file  <stem>-unsloth-<quant>.gguf  or similar.
     gguf_candidates = list(Path(output_dir).glob("*.gguf"))
     if not gguf_candidates:
         raise FileNotFoundError(
-            f"GGUF export claimed success but no .gguf file found in {output_dir}"
+            f"GGUF export failed — no .gguf found in {output_dir}"
         )
-    gguf_path = sorted(gguf_candidates)[-1]   # pick newest if multiple
-    print(f"✅  GGUF saved → {gguf_path}")
+    gguf_path = sorted(gguf_candidates)[-1]
+    print(f"GGUF saved -> {gguf_path}")
     return gguf_path
 
 
@@ -103,7 +132,8 @@ def register_with_ollama(
 
     payload = {
         "model": ollama_model_name,
-        "modelfile": modelfile_content,
+        "from": str(gguf_abs),
+        "modelfile": modelfile_content,  # fallback for older Ollama versions
         "stream": False,
     }
 
@@ -120,11 +150,11 @@ def register_with_ollama(
             f"    echo 'FROM {gguf_abs}' > Modelfile\n"
             f"    ollama create {ollama_model_name} -f Modelfile"
         )
-        print(f"⚠️  {msg}")
+        print(f"  {msg}")
         return {"registered": False, "error": "Ollama not reachable", "manual_cmd": msg}
 
     if resp.status_code != 200:
-        print(f"❌  Ollama /api/create returned {resp.status_code}: {resp.text}")
+        print(f"  Ollama /api/create returned {resp.status_code}: {resp.text}")
         return {"registered": False, "status_code": resp.status_code, "body": resp.text}
 
     try:
@@ -132,7 +162,7 @@ def register_with_ollama(
     except Exception:
         data = {}
 
-    print(f"✅  Ollama model `{ollama_model_name}` registered successfully.")
+    print(f" Ollama model `{ollama_model_name}` registered successfully.")
     print(f"    Run it with:  ollama run {ollama_model_name}")
     return {"registered": True, "model": ollama_model_name, "gguf_path": str(gguf_abs), "raw": data}
 
@@ -142,50 +172,89 @@ def main():
     parser.add_argument("--train_path", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--max_steps", type=int, default=200)
+    parser.add_argument("--ollama_model_name", type=str, help="Name for Ollama")
+    parser.add_argument("--gguf_quantization", type=str, default="q4_k_m")
+    parser.add_argument("--skip_gguf", action="store_true")
+    parser.add_argument("--ollama_base_url", type=str, default="http://localhost:11434")
+    parser.add_argument("--epochs", type=int, default=1) # Fallback if max_steps isn't used
     args = parser.parse_args()
-
-    train_dataset = load_jsonl_as_hf_dataset(args.train_path)
-
+    # ✅ Always load model — needed for both training AND gguf export
     model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=args.base_model,
-    max_seq_length=1024,
-    dtype="bfloat16",
-    load_in_4bit=True 
+        model_name=args.base_model,
+        max_seq_length=1024,
+        dtype=torch.float16,
+        load_in_4bit=True,
     )
+
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
 
     model = FastLanguageModel.get_peft_model(
         model,
-        r=8,
+        r=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
         lora_alpha=16,
-        lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_dropout=0,
+        bias="none",
     )
 
-    training_args = TrainingArguments(
-    output_dir=args.output_dir,
-    per_device_train_batch_size=1,      # ✅ Down from 4 → 1
-    gradient_accumulation_steps=16,     # ✅ Up from 4 → 16 (keeps effective batch size = 16)
-    learning_rate=2e-4,
-    max_steps=args.max_steps,
-    logging_steps=10,
-    save_strategy="steps",
-    save_steps=args.max_steps,
-    bf16=True,
-    optim="adamw_8bit",                 # ✅ Change from adamw_torch → adamw_8bit (saves ~1GB)
-    report_to=[],
-    )
+    # ── Training (only if max_steps > 0) ─────────────────────────────────────
+    if args.max_steps > 0:
+        if not args.train_path or args.train_path == ".":
+            raise ValueError("Training requires a valid --train_path")
 
-    trainer = SFTTrainer(
-        model=model,
-        train_dataset=train_dataset,
-        tokenizer=tokenizer,
-        args=training_args,
-        dataset_text_field="text",
-    )
+        train_dataset = load_jsonl_as_hf_dataset(args.train_path)
 
-    trainer.train()
-    trainer.save_model(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+        training_args = TrainingArguments(
+            output_dir=args.output_dir,
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=16,
+            learning_rate=2e-4,
+            max_steps=args.max_steps,
+            logging_steps=10,
+            save_strategy="steps",
+            save_steps=args.max_steps,
+            fp16=True,        # was bf16
+            bf16=False,
+            optim="adamw_8bit",
+            report_to=[],
+        )
+
+        trainer = SFTTrainer(
+            model=model,
+            train_dataset=train_dataset,
+            tokenizer=tokenizer,
+            args=training_args,
+            dataset_text_field="text",
+        )
+
+        trainer.train()
+        trainer.save_model(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        model.config.save_pretrained(args.output_dir)
+
+        # Save metadata
+        meta = {
+            "base_model": args.base_model,
+            "lora_r": 16,
+            "lora_alpha": 16,
+            "max_seq_length": 1024,
+            "dtype": "float16",
+            "trained_on": str(Path(args.train_path).name),
+            "max_steps": args.max_steps,
+        }
+        (Path(args.output_dir) / "training_meta.json").write_text(
+            json.dumps(meta, indent=2)
+        )
+        print(f" Training complete. Adapter saved to {args.output_dir}")
+
+    else:
+        #  No training — load existing adapter weights from output_dir
+        print(f"  Skipping training (max_steps=0). Loading existing adapter from {args.output_dir}")
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.output_dir)
+        print(f" Adapter loaded from {args.output_dir}")
     # ── GGUF export ───────────────────────────────────────────────────────────
     gguf_path = None
     if not args.skip_gguf:
@@ -196,8 +265,8 @@ def main():
                 quantization=args.gguf_quantization,
             )
         except Exception as e:
-            print(f"⚠️  GGUF export failed: {e}")
-            print(f"    HuggingFace adapter is still available at {args.output_dir}")
+            print(f"[WARNING] GGUF export failed: {e}")
+            print(f"[INFO] HuggingFace adapter is still available at {args.output_dir}")
 
     # ── Ollama registration ───────────────────────────────────────────────────
     if gguf_path and args.ollama_model_name:
@@ -209,16 +278,16 @@ def main():
         # Write a JSON summary next to the adapter so the UI can read it
         summary_path = Path(args.output_dir) / "ollama_registration.json"
         summary_path.write_text(json.dumps(result, indent=2))
-        print(f"\n📝  Registration summary → {summary_path}")
+        print(f"\n Registration summary → {summary_path}")
 
     elif not args.skip_gguf and not args.ollama_model_name:
         print(
-            "\nℹ️  --ollama_model_name not provided — skipping Ollama registration.\n"
+            "\n --ollama_model_name not provided — skipping Ollama registration.\n"
             "    To register manually after this script finishes:\n"
             f"    echo 'FROM <path>.gguf' > Modelfile && ollama create <name> -f Modelfile"
         )
 
-    print("\n🎉  Fine-tuning pipeline complete.")
+    print("\n Fine-tuning pipeline complete.")
 
 
 
