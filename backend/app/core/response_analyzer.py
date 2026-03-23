@@ -42,11 +42,7 @@ class ResponseAnalyzer:
     ]
     
     def __init__(self):
-        self.judge_client = LLMClientFactory.create(
-            provider="groq",
-            model_name=settings.JUDGE_MODEL,
-            api_key=settings.GROQ_API_KEY
-        )
+        self.judge_client = LLMClientFactory.create_judge()
         
         # ✅ Load available strategies dynamically
         self._load_available_strategies()

@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     )
 
     # ── Judge Model ───────────────────────────────────────────────────────────
+    JUDGE_PROVIDER: Literal["groq", "nvidia", "ollama"] = Field(
+        default="groq",
+        description="Provider for the judge/evaluator LLM"
+    )
     JUDGE_MODEL:       str   = Field(default="llama-3.3-70b-versatile")
     JUDGE_TEMPERATURE: float = Field(default=0.0, ge=0.0, le=1.0)
 
@@ -66,7 +70,7 @@ class Settings(BaseSettings):
 
     # ── Generation Parameters ─────────────────────────────────────────────────
     ATTACKER_TEMPERATURE: float = Field(default=0.7, ge=0.0, le=2.0)
-    MAX_TOKENS:           int   = Field(default=1024, ge=100, le=4096)
+    MAX_TOKENS:           int   = Field(default=512, ge=100, le=4096)
 
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     MAX_REQUESTS_PER_MINUTE: int = Field(default=30, ge=1)
@@ -116,6 +120,15 @@ class Settings(BaseSettings):
                 # No provider prefix — skip with warning
                 pass
         return result
+
+    def get_api_key_for_provider(self, provider: str) -> str | None:
+        """Return the configured API key for a provider, if applicable."""
+        provider = provider.lower()
+        if provider == "groq":
+            return self.GROQ_API_KEY
+        if provider == "nvidia":
+            return self.NVIDIA_API_KEY
+        return None
 
     class Config:
         # ✅ Absolute path — works from ANY CWD (scripts/, root, etc.)

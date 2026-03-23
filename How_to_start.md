@@ -117,7 +117,79 @@ GPU: NVIDIA GeForce RTX XXXX
 > - Check `nvidia-smi` runs successfully in your terminal
 
 ---
-
+### Step 6 — GGUF Export Setup (for Fine-Tuned Model Deployment)
+ 
+After fine-tuning a model, the platform can export it to GGUF format so it can be registered and run via Ollama. This requires **llama.cpp** — but you do **not** need to compile it from source.
+ 
+#### Option A — Automatic Setup (Recommended)
+ 
+The platform will **automatically download and set up llama.cpp** the first time you click **Generate GGUF** in the Retraining page. No manual steps required.
+ 
+What happens automatically:
+1. The script checks if `C:\llama.cpp\` exists
+2. If not, it fetches the latest pre-built Windows binary from the [llama.cpp GitHub releases](https://github.com/ggerganov/llama.cpp/releases/latest)
+3. It downloads the correct CUDA build for your system
+4. It extracts the binary to `C:\llama.cpp\`
+5. It downloads the `convert_hf_to_gguf.py` conversion script
+ 
+**Expected download size:** ~50–100 MB  
+**Expected time:** 1–3 minutes depending on internet speed
+ 
+> 💡 This only happens **once**. Subsequent GGUF exports use the cached binary and are instant.
+ 
+#### Option B — Manual Setup
+ 
+If automatic setup fails (e.g. no internet access, firewall restrictions), follow these steps manually:
+ 
+**Step 6a — Download the pre-built binary:**
+ 
+Go to: [https://github.com/ggerganov/llama.cpp/releases/latest](https://github.com/ggerganov/llama.cpp/releases/latest)
+ 
+Download the file matching your system:
+ 
+| GPU | File to download |
+|---|---|
+| NVIDIA GPU (CUDA 12.x) | `llama-*-bin-win-cuda-cu12.x.x-x64.zip` |
+| CPU only (no GPU) | `llama-*-bin-win-x64.zip` |
+ 
+**Step 6b — Extract to the correct location:**
+ 
+1. Create the folder `C:\llama.cpp\`
+2. Extract the **contents** of the zip directly into `C:\llama.cpp\`
+ 
+After extraction, verify these files exist:
+```
+C:\llama.cpp\
+    llama-quantize.exe       ← required
+    llama-cli.exe
+    llama.dll
+    ggml.dll
+    ... other files
+```
+ 
+**Step 6c — Download the conversion script:**
+ 
+The zip does not always include `convert_hf_to_gguf.py`. Download it separately:
+ 
+```bash
+curl -o C:\llama.cpp\convert_hf_to_gguf.py ^
+  https://raw.githubusercontent.com/ggerganov/llama.cpp/master/convert_hf_to_gguf.py
+```
+ 
+Or open the URL in your browser and save the file to `C:\llama.cpp\convert_hf_to_gguf.py`.
+ 
+**Step 6d — Verify setup:**
+ 
+```bash
+dir C:\llama.cpp\convert_hf_to_gguf.py
+dir C:\llama.cpp\llama-quantize.exe
+```
+ 
+Both files should be listed. You are now ready to export GGUF from the Retraining page.
+ 
+> ⚠️ **Do not use winget or cmake.** Earlier versions of Unsloth tried to compile llama.cpp from source using winget and cmake — this fails on most Windows machines without admin rights and Visual Studio. The pre-built binary approach above bypasses this entirely.
+ 
+---
 ### Step 6 — Start the Application
 
 Make sure Ollama and MongoDB are running, then launch the Streamlit frontend:

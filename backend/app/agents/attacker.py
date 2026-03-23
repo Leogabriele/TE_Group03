@@ -278,9 +278,12 @@ class AttackerAgent:
     def _build_fallback_clients(self) -> List[BaseLLMClient]:
         """Build ordered list of fallback clients from settings."""
         clients = []
+        seen = set()
 
         for provider, model in settings.get_attacker_fallback_list():
             try:
+                if (provider, model) in seen:
+                    continue
                 if provider == "ollama":
                     client = LLMClientFactory.create(
                         provider="ollama",
@@ -303,10 +306,35 @@ class AttackerAgent:
                     continue
 
                 clients.append(client)
+                seen.add((provider, model))
                 logger.debug(f"Registered fallback attacker: {provider}/{model}")
 
             except Exception as e:
                 logger.warning(f"Could not register fallback {provider}/{model}: {e}")
+
+        # Add the alternate cloud provider automatically so a bad primary key
+        # does not prevent prompt generation when another provider is configured.
+        alternate_provider = "nvidia" if settings.ATTACKER_PROVIDER.lower() == "groq" else "groq"
+        alternate_key = settings.get_api_key_for_provider(alternate_provider)
+        if alternate_key:
+            alternate_entry = (alternate_provider, settings.TARGET_MODEL_NAME)
+            if alternate_entry not in seen:
+                try:
+                    clients.append(
+                        LLMClientFactory.create(
+                            provider=alternate_provider,
+                            model_name=settings.TARGET_MODEL_NAME,
+                            api_key=alternate_key
+                        )
+                    )
+                    seen.add(alternate_entry)
+                    logger.debug(
+                        f"Registered automatic attacker fallback: {alternate_provider}/{settings.TARGET_MODEL_NAME}"
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Could not register automatic attacker fallback {alternate_provider}: {e}"
+                    )
 
         # Always try local Ollama as the last LLM fallback (most permissive)
         try:
@@ -315,8 +343,11 @@ class AttackerAgent:
                 model_name=settings.ATTACKER_OLLAMA_MODEL,
                 is_local=True
             )
-            clients.append(ollama_fallback)
-            logger.debug(f"Registered Ollama fallback: {settings.ATTACKER_OLLAMA_MODEL}")
+            ollama_entry = ("ollama", settings.ATTACKER_OLLAMA_MODEL)
+            if ollama_entry not in seen:
+                clients.append(ollama_fallback)
+                seen.add(ollama_entry)
+                logger.debug(f"Registered Ollama fallback: {settings.ATTACKER_OLLAMA_MODEL}")
         except Exception as e:
             logger.debug(f"Ollama not available as fallback: {e}")
 
