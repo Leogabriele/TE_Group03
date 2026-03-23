@@ -197,6 +197,7 @@ class AttackerAgent:
         attacker_provider: Optional[str] = None,   # ← NEW
         attacker_model: Optional[str] = None,       # ← NEW
     ):
+        
         """
         Initialize attacker agent.
         Priority:

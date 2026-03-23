@@ -591,7 +591,9 @@ def full_audit_interface(provider, model, is_local, save_to_db, parallel):
                 model=model,
                 is_local=is_local,
                 parallel=parallel,
-                existing_id=st.session_state.active_audit_session_id if save_to_db else None
+                existing_id=st.session_state.active_audit_session_id if save_to_db else None,
+                attacker_provider=attacker_provider_full,
+                attacker_model=attacker_model_full
             )
 
         progress_bar.progress(100)

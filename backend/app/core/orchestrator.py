@@ -41,28 +41,23 @@ class Orchestrator:
         self,
         target_provider: Optional[str] = None,
         target_model: Optional[str] = None,
-        model_object: Optional[Any] = None,  # NEW PARAMETER for direct model objects
-        tokenizer:Optional[Any] = None,  # NEW PARAMETER for custom tokenizers
-        is_local: bool = False  # NEW PARAMETER,
+        model_object: Optional[Any] = None,
+        tokenizer: Optional[Any] = None,
+        is_local: bool = False,
+        attacker_provider: Optional[str] = None,   # ← ADD THIS
+        attacker_model: Optional[str] = None,       # ← ADD THIS
     ):
-        """
-        Initialize orchestrator.
-
-        Args:
-            target_provider: Target model provider (groq/nvidia/ollama)
-            target_model: Target model name
-            model_object: Direct model object (for unsloth)
-            tokenizer: Custom tokenizer (for unsloth)
-            is_local: Whether target is a local model
-        """
-        self.attacker = AttackerAgent()
+        self.attacker = AttackerAgent(
+            attacker_provider=attacker_provider,
+            attacker_model=attacker_model,
+        )
         self.judge = JudgeAgent()
 
         self.target_provider = target_provider or settings.TARGET_MODEL_PROVIDER
-        self.target_model = target_model or settings.TARGET_MODEL_NAME
-        self.model_object = model_object
-        self.tokenizer = tokenizer
-        self.is_local = is_local
+        self.target_model    = target_model or settings.TARGET_MODEL_NAME
+        self.model_object    = model_object
+        self.tokenizer       = tokenizer
+        self.is_local        = is_local
         
         # Create target client (local or cloud)
         if self.target_provider == "unsloth":
@@ -498,9 +493,9 @@ class Orchestrator:
         """Get orchestrator statistics"""
         return {
             "target_model": f"{self.target_provider}/{self.target_model}" if self.target_model else f"{self.target_provider}",
-            "attacker_model": self.attacker.llm_client.model_name,
+            "attacker_model": self.attacker.primary_client.model_name,
             "judge_model": self.judge.llm_client.model_name,
-            "attacker_stats": self.attacker.llm_client.get_stats(),
+            "attacker_stats": self.attacker.primary_client.get_stats(),
             "judge_stats": self.judge.llm_client.get_stats(),
             "target_stats": self.target_client.get_stats()
         }
