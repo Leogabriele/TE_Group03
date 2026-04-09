@@ -87,6 +87,7 @@ class LLMProvider(str, Enum):
     NVIDIA = "nvidia"
     OLLAMA = "ollama"
     HUGGINGFACE = "huggingface"
+    UNSLOTH = "unsloth"
 
 
 class AttackPhase(str, Enum):

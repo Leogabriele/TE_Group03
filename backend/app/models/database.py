@@ -39,8 +39,15 @@ class Database:
         """Establish database connection"""
         try:
             if self.client is not None:
-                self.client.close()
-                self.client = None
+                try:
+                    await self.client.admin.command('ping')
+                    if self.db is None:
+                        self.db = self.client[settings.MONGODB_DB_NAME]
+                    self._initialize_collections()
+                    logger.debug("🔁 Reusing existing MongoDB connection")
+                    return
+                except Exception:
+                    await self.disconnect()
 
             self.client = AsyncIOMotorClient(
                 settings.MONGODB_URI,
@@ -52,51 +59,66 @@ class Database:
             await self.client.admin.command('ping')
             
             # Initialize collection references
-            self.attacks_collection = self.db["attacks"]
-            self.responses_collection = self.db["responses"]
-            self.evaluations_collection = self.db["evaluations"]
-            self.metrics_collection = self.db["metrics"]
-            
-            # Multi-turn collections
-            self.conversations_collection = self.db["conversations"]
-            self.multiturn_results_collection = self.db["multiturn_results"]
-
-            # NEW: Audit sessions
-            self.audit_sessions_collection = self.db["audit_sessions"]
+            self._initialize_collections()
             
             logger.info(f"✅ Connected to MongoDB: {settings.MONGODB_DB_NAME}")
             
             await self._create_indexes()
             
-        except ConnectionFailure as e:
+        except Exception as e:
             logger.error(f"❌ Failed to connect to MongoDB: {e}")
+            await self.disconnect()
             raise
     
     async def disconnect(self):
         """Close database connection"""
         if self.client:
-            self.client.close()
-            self.client = None
-            logger.info("🔌 Disconnected from MongoDB")
-    
+            try:
+                self.client.close()
+            except Exception as e:
+                logger.warning(f"⚠️ Error closing MongoDB client: {e}")
+
+        self.client = None
+        self.db = None
+        self.attacks_collection = None
+        self.responses_collection = None
+        self.evaluations_collection = None
+        self.metrics_collection = None
+        self.conversations_collection = None
+        self.multiturn_results_collection = None
+        self.audit_sessions_collection = None
+        logger.info("🔌 Disconnected from MongoDB")
+
+    def _initialize_collections(self):
+        """Initialize collection references from the current database."""
+        if self.db is None:
+            return
+        self.attacks_collection = self.db["attacks"]
+        self.responses_collection = self.db["responses"]
+        self.evaluations_collection = self.db["evaluations"]
+        self.metrics_collection = self.db["metrics"]
+        self.conversations_collection = self.db["conversations"]
+        self.multiturn_results_collection = self.db["multiturn_results"]
+        self.audit_sessions_collection = self.db["audit_sessions"]
+
     async def _create_indexes(self):
         """Create database indexes for performance"""
         try:
             # Attacks collection
-            await self.db.attacks.create_index("attack_id", unique=True)
-            await self.db.attacks.create_index("timestamp")
-            await self.db.attacks.create_index("strategy_type")
+            await self.attacks_collection.create_index("attack_id", unique=True)
+            await self.attacks_collection.create_index("timestamp")
+            await self.attacks_collection.create_index("strategy_type")
             
             # Responses collection
-            await self.db.responses.create_index("response_id", unique=True)
-            await self.db.responses.create_index("attack_id")
-            await self.db.responses.create_index("timestamp")
+            await self.responses_collection.create_index("response_id", unique=True)
+            await self.responses_collection.create_index("attack_id")
+            await self.responses_collection.create_index("timestamp")
             
             # Evaluations collection
-            await self.db.evaluations.create_index("evaluation_id", unique=True)
-            await self.db.evaluations.create_index("response_id")
-            await self.db.evaluations.create_index("verdict")
-            await self.db.evaluations.create_index("timestamp")
+            await self.evaluations_collection.create_index("evaluation_id", unique=True)
+            await self.evaluations_collection.create_index("response_id")
+            await self.evaluations_collection.create_index("verdict")
+            await self.evaluations_collection.create_index("timestamp")
             
             # Multi-turn conversations indexes
             await self.conversations_collection.create_index([

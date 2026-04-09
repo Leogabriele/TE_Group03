@@ -61,8 +61,10 @@ log/
 *.sqlite3
 
 # MongoDB
-data/
+
 mongodb/
+models/gemma3-1b-safe-latest-safe/
+
 
 # Streamlit
 .streamlit/secrets.toml
