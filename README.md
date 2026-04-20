@@ -24,7 +24,7 @@ This project addresses the critical need for automated red-teaming tools that ca
 - **Database:** MongoDB *(for storing attack results, conversation history, and audit logs)*  
 - **Attack Strategies:** 15+ custom jailbreak techniques *(persona adoption, prefix injection, multi-turn attacks, etc.)*  
 - **Analysis Engine:** Pattern-based + LLM-powered evaluation *(for verdict classification)*  
-- **Deployment:** Docker containers *(for reproducible environments)* with local or cloud deployment options
+- **Deployment:** Docker containers *(for reproducible environments)* with local or cloud deployment option
 
 <div align="center">
 <img src="https://user-images.githubusercontent.com/74038190/212284100-561aa473-3905-4a80-b561-0d28506553ee.gif" width="100%">
